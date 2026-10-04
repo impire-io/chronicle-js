@@ -19,3 +19,4 @@ export * from "./client.js";
 export { request, requestStream, Streamed, type CallOptions, type StreamOptions } from "./rpc.js";
 export { compileSchema, type Validator } from "./contract/schema.js";
 export * from "./bridge.js";
+export * from "./github.js";
