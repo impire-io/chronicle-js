@@ -27,6 +27,8 @@ export interface InstallProfile {
   github_api_base?: string;
   /** GitHub's OAuth endpoint, when it is not github.com's. */
   github_oauth_base?: string;
+  /** Where the web flow's code and refresh token are traded for tokens: control's exchange (decision 0041). */
+  github_token_url?: string;
 }
 
 /** Fetches an install's profile; integrity comes from the HTTPS name it is served at. */
