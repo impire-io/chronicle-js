@@ -1,0 +1,38 @@
+name: release
+
+# A v* tag is a release (decision 0040, after 0017): the gate and the
+# conformance suite of the declared contract version run again, then the
+# package is published to npm with provenance. Publishing needs the
+# NPM_TOKEN secret (or npm trusted publishing for this workflow).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      - name: The tag is the package version
+        run: test "v$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME}"
+
+      - name: Gate
+        run: make lint test build
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
