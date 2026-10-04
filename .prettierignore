@@ -1,0 +1,5 @@
+dist/
+.chronicle/
+node_modules/
+package-lock.json
+contract/

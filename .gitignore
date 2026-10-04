@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.chronicle/
+coverage/
+.claude/settings.local.json
