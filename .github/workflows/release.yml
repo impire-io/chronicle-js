@@ -2,8 +2,10 @@ name: release
 
 # A v* tag is a release (decision 0040, after 0017): the gate and the
 # conformance suite of the declared contract version run again, then the
-# package is published to npm with provenance. Publishing needs the
-# NPM_TOKEN secret (or npm trusted publishing for this workflow).
+# package is published to npm with provenance. Publishing is npm trusted
+# publishing: npm trusts this workflow of impire-io/chronicle-js through
+# GitHub's OIDC token (id-token: write), so no npm token is stored here.
+# Trusted publishing needs npm 11.5.1 or later.
 on:
   push:
     tags: ["v*"]
@@ -24,6 +26,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
 
+      - name: An npm that speaks trusted publishing
+        run: npm install -g npm@11 && npm --version
+
       - run: npm ci
 
       - name: The tag is the package version
@@ -34,5 +39,3 @@ jobs:
 
       - name: Publish
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
