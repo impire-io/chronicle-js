@@ -4,8 +4,9 @@
 // rides the CONNECT as `<selector>:<token>`, and the server places the
 // connection in an account, or in the identity plane where an identity
 // learns its memberships and creates its first account. This wire is the
-// managed service's (chronicle-service controlclient and wire); the open
-// form has no bridge and connects with creds.
+// open contract's client half of the bridge (decision 0043) — the same one
+// the Go module's bridge package speaks; the callout that answers it is
+// the managed service's, and an install without one connects with creds.
 import type { NatsConnection } from "@nats-io/nats-core";
 import { Client, dial } from "./client.js";
 import { request, type CallOptions } from "./rpc.js";
