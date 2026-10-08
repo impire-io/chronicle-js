@@ -8,10 +8,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import {
+  InstanceExistsError,
+  InstanceMovedError,
   NoResponderError,
   ServiceError,
-  ThingExistsError,
-  ThingMovedError,
   UndefinedOperationError,
   type Client,
   type TypeDefinition,
@@ -25,11 +25,11 @@ interface Expect {
   state?: Record<string, unknown>;
   types?: string[];
   items?: string[];
-  things?: string[];
+  instances?: string[];
   total?: number;
   count?: number;
   error?: string;
-  rolled?: boolean;
+  taken?: boolean;
   type?: string;
   first?: unknown;
   contains?: Record<string, unknown>;
@@ -38,14 +38,15 @@ interface Expect {
 
 interface Step {
   do: string;
-  log?: string;
-  thing?: string;
+  store?: string;
+  instance?: string;
   type?: string;
   index?: string;
   kind?: string;
   op?: string;
   text?: string;
-  prefix?: string;
+  in?: string;
+  where?: Record<string, string>;
   def?: TypeDefinition;
   config?: unknown;
   payload?: unknown;
@@ -85,10 +86,10 @@ const sameSet = (a: string[], b: string[]): boolean => isDeepStrictEqual([...a].
 /** Whether err is the error the scenario names (the Go runner's matchesError). */
 function matchesError(err: unknown, want: string): boolean {
   switch (want) {
-    case "thing-exists":
-      return err instanceof ThingExistsError;
-    case "thing-moved":
-      return err instanceof ThingMovedError;
+    case "instance-exists":
+      return err instanceof InstanceExistsError;
+    case "instance-moved":
+      return err instanceof InstanceMovedError;
     case "undefined-operation":
       return err instanceof UndefinedOperationError;
     case "no-responder":
@@ -96,8 +97,8 @@ function matchesError(err: unknown, want: string): boolean {
     case "preflight":
       return (
         !(err instanceof ServiceError) &&
-        !(err instanceof ThingExistsError) &&
-        !(err instanceof ThingMovedError)
+        !(err instanceof InstanceExistsError) &&
+        !(err instanceof InstanceMovedError)
       );
   }
   return err instanceof ServiceError && err.code === want;
@@ -164,56 +165,56 @@ class Runner {
 
   async perform(label: string, s: Step): Promise<void> {
     const c = this.c;
-    const log = str(s.log);
-    const thing = str(s.thing);
+    const store = str(s.store);
+    const instance = str(s.instance);
     const e = s.expect ?? {};
     switch (s.do) {
-      case "log.create":
-        await c.createLog(log);
+      case "store.create":
+        await c.createStore(store);
         return;
       case "type.define":
-        await c.defineType(log, str(s.type), s.def ?? { schema: {} });
+        await c.defineType(store, str(s.type), s.def ?? { schema: {} });
         return;
       case "index.declare":
-        await c.declareIndex(log, str(s.index), str(s.kind), s.config);
+        await c.declareIndex(store, str(s.index), str(s.kind), s.config);
         return;
       case "index.delete":
-        await c.deleteIndex(log, str(s.index));
+        await c.deleteIndex(store, str(s.index));
         return;
-      case "create":
-        await c.createThing(log, thing, s.payload);
+      case "instance.create.snapshot":
+        await c.createFromSnapshot(store, instance, s.payload);
         return;
-      case "create.op":
-        await c.createWith(log, thing, s.op ?? "create", s.payload);
+      case "instance.create":
+        await c.create(store, instance, s.op ?? "create", s.payload);
         return;
-      case "do":
-        await c.append(
-          log,
-          thing,
+      case "apply":
+        await c.apply(
+          store,
+          instance,
           str(s.op),
           s.payload,
           s.expectSeq === undefined ? {} : { expectedSeq: s.expectSeq },
         );
         return;
-      case "do.guarded": {
-        const sv = await c.state(log, thing);
-        await c.append(log, thing, str(s.op), s.payload, { expectedSeq: sv.seq });
+      case "apply.guarded": {
+        const sv = await c.state(store, instance);
+        await c.apply(store, instance, str(s.op), s.payload, { expectedSeq: sv.seq });
         return;
       }
-      case "rollup": {
-        const r = await c.rollupThing(log, thing);
-        if (e.rolled !== undefined && r.rolled !== e.rolled) {
-          throw new Error(`rolled=${String(r.rolled)} (${str(r.reason)}), want ${String(e.rolled)}`);
+      case "snapshot": {
+        const r = await c.snapshot(store, instance);
+        if (e.taken !== undefined && r.taken !== e.taken) {
+          throw new Error(`taken=${String(r.taken)} (${str(r.reason)}), want ${String(e.taken)}`);
         }
         return;
       }
       case "get":
-        await this.until(label, s, async () => subset((await c.state(log, thing)).state, e.state));
+        await this.until(label, s, async () => subset((await c.state(store, instance)).state, e.state));
         return;
       case "history":
         await this.until(label, s, async () => {
           const types: string[] = [];
-          for await (const op of c.replay(log, thing)) {
+          for await (const op of c.history(store, instance)) {
             types.push(op.type);
           }
           return isDeepStrictEqual(types, e.types) ? "" : `history types ${types.join(",")}`;
@@ -221,17 +222,17 @@ class Runner {
         return;
       case "query":
         await this.until(label, s, async () => {
-          const st = c.queryIndex(log, str(s.index), str(s.text), s.limit ? { limit: s.limit } : {});
-          const things: string[] = [];
+          const st = c.queryIndex(store, str(s.index), str(s.text), s.limit ? { limit: s.limit } : {});
+          const instances: string[] = [];
           for await (const hit of st) {
-            things.push(hit.thing);
+            instances.push(hit.instance);
           }
           const tr = st.trailer;
           if (tr === undefined) {
             return "no trailer";
           }
-          if (e.things && !sameSet(things, e.things)) {
-            return `hits ${things.join(",")}`;
+          if (e.instances && !sameSet(instances, e.instances)) {
+            return `hits ${instances.join(",")}`;
           }
           if (e.total !== undefined && tr.total !== e.total) {
             return `total ${tr.total}`;
@@ -242,28 +243,39 @@ class Runner {
           return "";
         });
         return;
-      case "list.logs":
+      case "list.stores":
       case "list.types":
       case "list.indexes":
       case "list.members":
-      case "list.things":
+      case "list.instances":
         await this.until(label, s, async () => {
           let items: string[] = [];
-          if (s.do === "list.logs") items = await collect(c.listLogs());
-          if (s.do === "list.types") items = await collect(c.listTypes(log));
-          if (s.do === "list.things") items = await collect(c.listThings(log, str(s.prefix)));
-          if (s.do === "list.indexes") for await (const i of c.listIndexes(log)) items.push(i.name);
+          if (s.do === "list.stores") items = await collect(c.listStores());
+          if (s.do === "list.types") items = await collect(c.listTypes(store));
+          if (s.do === "list.instances") {
+            for await (const i of c.listInstances(store, {
+              ...(s.type !== undefined ? { type: s.type } : {}),
+              ...(s.in !== undefined ? { under: s.in } : {}),
+              ...(s.where !== undefined ? { where: s.where } : {}),
+            })) {
+              items.push(i.path);
+            }
+          }
+          if (s.do === "list.indexes") {
+            // State is read as each instance's state, not listed as an index.
+            for await (const i of c.listIndexes(store)) if (i.kind !== "state") items.push(i.name);
+          }
           if (s.do === "list.members") for await (const m of c.listMembers()) items.push(m.name);
           return sameSet(items, e.items ?? []) ? "" : `items ${items.join(",")}`;
         });
         return;
       case "watch":
-        await this.live(label, s, (signal) => map(c.watch(log, thing, { signal }), (sv) => sv.state));
+        await this.live(label, s, (signal) => map(c.watch(store, instance, { signal }), (sv) => sv.state));
         return;
       case "tail":
         await this.live(label, s, (signal) =>
           map(
-            c.tail(log, thing, {
+            c.tail(store, instance, {
               signal,
               ...(s.live ? { live: true } : {}),
               ...(s.after !== undefined ? { after: s.after } : {}),
@@ -274,7 +286,7 @@ class Runner {
         return;
       case "watch.declarations":
         await this.live(label, s, (signal) =>
-          map(c.watchDeclarations(log, { signal }), (d) => `${d.kind}:${d.name}`),
+          map(c.watchDeclarations(store, { signal }), (d) => `${d.kind}:${d.name}`),
         );
         return;
     }

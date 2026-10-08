@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /** The contract version this SDK implements (design 12 § the artifact). */
-export const CONTRACT_VERSION = "1.0.0";
+export const CONTRACT_VERSION = "2.0.0";
 
 /** The interaction shapes the contract describes. */
 export const SHAPES = [
@@ -48,7 +48,7 @@ export const HEADERS = {
   },
   envelopeVersion: "1",
   guards: {
-    "Nats-Expected-Last-Subject-Sequence": "JetStream's per-subject CAS; 0 is birth",
+    "Nats-Expected-Last-Subject-Sequence": "JetStream's per-subject CAS; 0 is create",
     "Nats-Rollup": "a snapshot that replaces its subject's history; only ever the rollup subject value",
   },
   rollupSubject: "sub",
@@ -67,41 +67,47 @@ export const HEADERS = {
 export const GRAMMARS = {
   name: {
     pattern: "^[a-z0-9-]+$",
-    appliesTo: ["log", "index", "type", "principal", "aspect segment"],
+    appliesTo: ["store", "index", "type", "principal", "child name"],
   },
-  thingToken: {
+  instanceToken: {
     pattern: "^[a-zA-Z0-9_-]+$",
-    note: "a thing tail is one or more tokens joined with '.'; the tail is also the state bucket's key",
+    note: "one segment of an instance's path; a path is the segments joined with '/' as the user writes it, and with '.' as it is stored — the tail, which is also the state bucket's key",
   },
-  reservedLogNames: ["api", "meta", "sys"],
+  path: {
+    separator: "/",
+    storedSeparator: ".",
+    note: "type/id, then name/id for each child, e.g. invoice/inv-1/comments/c-3; converted to and from the stored tail segment for segment",
+  },
+  reservedStoreNames: ["api", "meta", "sys"],
   servicePrincipal: "chronicle",
   root: "CHRON",
   metaBucket: "META",
   snapshotOpType: "snapshot",
   stateFoldKey: "=fold",
   derivations: {
-    upperLog: "the log name uppercased with '-' mapped to '_'",
-    stream: "LOG_<LOG>",
-    stateBucket: "STATE_<LOG>",
-    logSubjects: "CHRON.<log>.>",
-    opsFilter: "CHRON.<log>.OPS.>",
-    opsSubject: "CHRON.<log>.OPS.<thing>",
+    upperStore: "the store name uppercased with '-' mapped to '_'",
+    stream: "LOG_<STORE>",
+    stateBucket: "STATE_<STORE>",
+    storeSubjects: "CHRON.<store>.>",
+    opsFilter: "CHRON.<store>.OPS.>",
+    opsSubject: "CHRON.<store>.OPS.<tail>",
   },
   metaKeys: {
-    logConfig: "log.<log>.config",
-    type: "log.<log>.type.<type>",
-    index: "index.<log>.<index>",
+    storeConfig: "log.<store>.config",
+    type: "log.<store>.type.<type>",
+    index: "index.<store>.<index>",
     principal: "identity.principal.<id>",
     member: "identity.member.<id>",
     invite: "identity.invite.<digest>",
   },
   roles: ["admin", "writer", "reader"],
   effects: ["merge", "none"],
-  history: ["compactable", "preserved"],
+  history: ["compactable", "full"],
   indexKinds: ["state", "search", "graph", "semantic"],
+  principalKinds: ["member", "service"],
 } as const;
 
-/** Settings every log stream carries. */
+/** Settings every store's stream carries. */
 export const STREAM_SETTINGS = {
   duplicateWindowSeconds: 120,
   defaultMaxBytes: 1073741824,
@@ -130,7 +136,7 @@ export const FOLD = {
     "malformed-snapshot",
   ],
   rules:
-    "resolve the tail first: an undeclared aspect is marked and moves nothing; a snapshot resets state to its payload's, judged against the thing schema when typed; a declared merge applies RFC 7386 onto current state, empty included; none, an unknown type, an unknown effect, a bad record or an invalid payload moves nothing; an untyped subject moves only by snapshot",
+    "resolve the tail (the path as stored) first: an undeclared child (one its parent type does not declare) is marked and moves nothing; a snapshot resets state to its payload's, judged against the instance schema when typed; a declared merge applies RFC 7386 onto current state, empty included; none, an unknown type, an unknown effect, a bad record or an invalid payload moves nothing; an untyped subject moves only by snapshot",
 } as const;
 
 /** The error catalog: every code a service returns, with its meaning. */
@@ -149,11 +155,11 @@ export const ERROR_CATALOG = [
   },
   {
     code: "not-a-member",
-    meaning: "the principal is not in the registry",
+    meaning: "the principal is not a member of the account",
   },
   {
-    code: "bad-log-name",
-    meaning: "the log name is outside [a-z0-9-]+ or reserved",
+    code: "bad-store-name",
+    meaning: "the store name is outside [a-z0-9-]+ or reserved",
   },
   {
     code: "bad-index-name",
@@ -168,8 +174,8 @@ export const ERROR_CATALOG = [
     meaning: "the principal name is outside [a-z0-9-]+ or reserved",
   },
   {
-    code: "bad-thing",
-    meaning: "the thing tail is not subject-token safe",
+    code: "bad-instance",
+    meaning: "the instance path has a segment outside [a-zA-Z0-9_-]+",
   },
   {
     code: "bad-role",
@@ -177,11 +183,11 @@ export const ERROR_CATALOG = [
   },
   {
     code: "bad-history",
-    meaning: "the history declaration is outside the vocabulary (compactable, preserved)",
+    meaning: "the history policy is outside the vocabulary (compactable, full)",
   },
   {
     code: "bad-kind",
-    meaning: "the index kind is outside the node's vocabulary",
+    meaning: "the index kind is outside the vocabulary (search, graph, semantic)",
   },
   {
     code: "bad-config",
@@ -200,12 +206,12 @@ export const ERROR_CATALOG = [
     meaning: "an operation's name is not a valid op type",
   },
   {
-    code: "bad-aspect-segment",
-    meaning: "an aspects key is outside [a-z0-9-]+",
+    code: "bad-child-name",
+    meaning: "a child name is outside [a-z0-9-]+",
   },
   {
-    code: "bad-aspect-type",
-    meaning: "an aspects value names a type outside [a-z0-9-]+",
+    code: "bad-child-type",
+    meaning: "a child names a type outside [a-z0-9-]+",
   },
   {
     code: "bad-op",
@@ -216,8 +222,8 @@ export const ERROR_CATALOG = [
     meaning: "the graph direction is outside the vocabulary (out, in, both)",
   },
   {
-    code: "log-exists",
-    meaning: "the log already exists",
+    code: "store-exists",
+    meaning: "the store already exists",
   },
   {
     code: "index-exists",
@@ -228,20 +234,20 @@ export const ERROR_CATALOG = [
     meaning: "the member is already registered",
   },
   {
-    code: "no-such-log",
-    meaning: "the log does not exist",
+    code: "no-such-store",
+    meaning: "the store does not exist",
   },
   {
     code: "no-such-index",
     meaning: "the index is not declared",
   },
   {
-    code: "no-such-thing",
-    meaning: "the thing has no history on the log",
+    code: "no-such-instance",
+    meaning: "the instance has no history in the store",
   },
   {
     code: "reserved-state-index",
-    meaning: "the state index is the node's: not declarable, not deletable while the log exists",
+    meaning: "state is not an index a caller declares or deletes; it is read as the instance's state",
   },
   {
     code: "provider-unavailable",
@@ -255,11 +261,11 @@ export type ErrorCode =
   | "bad-request"
   | "forbidden"
   | "not-a-member"
-  | "bad-log-name"
+  | "bad-store-name"
   | "bad-index-name"
   | "bad-type-name"
   | "bad-principal-name"
-  | "bad-thing"
+  | "bad-instance"
   | "bad-role"
   | "bad-history"
   | "bad-kind"
@@ -267,16 +273,16 @@ export type ErrorCode =
   | "bad-schema"
   | "bad-effect"
   | "bad-op-type"
-  | "bad-aspect-segment"
-  | "bad-aspect-type"
+  | "bad-child-name"
+  | "bad-child-type"
   | "bad-op"
   | "bad-direction"
-  | "log-exists"
+  | "store-exists"
   | "index-exists"
   | "member-exists"
-  | "no-such-log"
+  | "no-such-store"
   | "no-such-index"
-  | "no-such-thing"
+  | "no-such-instance"
   | "reserved-state-index"
   | "provider-unavailable";
 
@@ -302,11 +308,11 @@ export interface TypeRecordRecord {
         [k: string]: unknown | undefined;
       }
     | boolean;
-  history?: "compactable" | "preserved";
+  history?: "compactable" | "full";
   /**
-   * {segment → type}
+   * {name → type}: the child types that may live under an instance of this type
    */
-  aspects?: {
+  children?: {
     [k: string]: string | undefined;
   };
   operations?: {
@@ -391,23 +397,23 @@ export interface PingReply {
   version: string;
 }
 
-export interface LogCreateRequest {
+export interface StoreCreateRequest {
   /**
    * the caller's principal ID — the same assertion as Op-Author
    */
   principal: string;
-  log: string;
+  store: string;
   description?: string;
   /**
    * per-log byte budget; zero means the default
    */
   max_bytes?: number;
-  history?: "compactable" | "preserved";
+  history?: "compactable" | "full";
 }
 
-export interface LogCreateReply {
+export interface StoreCreateReply {
   /**
-   * the created stream, LOG_<LOG>
+   * the created stream, LOG_<STORE>
    */
   stream: string;
 }
@@ -417,7 +423,7 @@ export interface TypeDefineRequest {
    * the caller's principal ID — the same assertion as Op-Author
    */
   principal: string;
-  log: string;
+  store: string;
   type: string;
   /**
    * a JSON Schema document
@@ -427,8 +433,8 @@ export interface TypeDefineRequest {
         [k: string]: unknown | undefined;
       }
     | boolean;
-  history?: "compactable" | "preserved";
-  aspects?: {
+  history?: "compactable" | "full";
+  children?: {
     [k: string]: string | undefined;
   };
   operations?: {
@@ -452,20 +458,20 @@ export interface TypeDefineReply {
   revision: number;
 }
 
-export interface ThingRollupRequest {
+export interface InstanceSnapshotRequest {
   /**
    * the caller's principal ID — the same assertion as Op-Author
    */
   principal: string;
-  log: string;
+  store: string;
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
-  thing: string;
+  instance: string;
 }
 
-export interface ThingRollupReply {
-  rolled: boolean;
+export interface InstanceSnapshotReply {
+  taken: boolean;
   /**
    * the new snapshot's stream sequence when rolled
    */
@@ -481,7 +487,7 @@ export interface IndexDeclareRequest {
    * the caller's principal ID — the same assertion as Op-Author
    */
   principal: string;
-  log: string;
+  store: string;
   index: string;
   /**
    * search | graph | semantic; state is the node's
@@ -505,7 +511,7 @@ export interface IndexDeleteRequest {
    * the caller's principal ID — the same assertion as Op-Author
    */
   principal: string;
-  log: string;
+  store: string;
   index: string;
 }
 
@@ -528,6 +534,10 @@ export interface MemberAddRequest {
    * the GitHub numeric ID the membership is bound to; zero means unbound
    */
   github_id?: number;
+  /**
+   * a person (member, the default) or a machine (service account)
+   */
+  kind?: "member" | "service";
 }
 
 export interface MemberAddReply {
@@ -565,9 +575,9 @@ export interface IndexQuerySearchRequest {
 
 export interface IndexQuerySearchItem {
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
-  thing: string;
+  instance: string;
   score: number;
 }
 
@@ -585,9 +595,9 @@ export interface IndexQueryGraphNeighborsRequest {
   principal: string;
   op?: "neighbors";
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
-  thing: string;
+  instance: string;
   direction?: "out" | "in" | "both";
   label?: string;
   /**
@@ -598,11 +608,11 @@ export interface IndexQueryGraphNeighborsRequest {
 
 export interface IndexQueryGraphNeighborsItem {
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
   from: string;
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
   to: string;
   label: string;
@@ -620,9 +630,9 @@ export interface IndexQueryGraphWalkRequest {
   principal: string;
   op: "walk";
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
-  thing: string;
+  instance: string;
   direction?: "out" | "in" | "both";
   labels?: string[];
   /**
@@ -630,16 +640,16 @@ export interface IndexQueryGraphWalkRequest {
    */
   depth?: number;
   /**
-   * zero streams every reachable thing
+   * zero streams every reachable instance
    */
   limit?: number;
 }
 
 export interface IndexQueryGraphWalkItem {
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
-  thing: string;
+  instance: string;
   depth: number;
   via: string;
 }
@@ -664,9 +674,9 @@ export interface IndexQuerySemanticRequest {
 
 export interface IndexQuerySemanticItem {
   /**
-   * a thing tail: subject-token-safe segments joined with '.'
+   * a instance tail: subject-token-safe segments joined with '.'
    */
-  thing: string;
+  instance: string;
   score: number;
   field?: string;
 }
@@ -674,7 +684,7 @@ export interface IndexQuerySemanticItem {
 export interface IndexQuerySemanticTrailer {
   total: number;
   /**
-   * things folded but not yet embedded — the honest degradation signal
+   * instances folded but not yet embedded — the honest degradation signal
    */
   unembedded: number;
 }
@@ -761,9 +771,9 @@ export interface WatchDeclarationsItem {
 }
 
 /**
- * the log name
+ * the store name
  */
-export type ListLogsItem = string;
+export type ListStoresItem = string;
 
 /**
  * the type name
@@ -782,38 +792,51 @@ export interface ListIndexesItem {
 export interface ListMembersItem {
   name: string;
   role: "admin" | "writer" | "reader";
+  kind?: "member" | "service";
   public_key?: string;
   github_id?: number;
 }
 
-/**
- * a thing tail: subject-token-safe segments joined with '.'
- */
-export type ListThingsItem = string;
+export interface ListInstancesItem {
+  /**
+   * the instance as the user writes it: type/id, then name/id per child
+   */
+  path: string;
+  /**
+   * the type its path names
+   */
+  type: string;
+  seq: number;
+  /**
+   * the folded state, when the scan carried values
+   */
+  state?: unknown;
+  [k: string]: unknown | undefined;
+}
 
-/** Every interaction's subject; <log>, <index> and <thing> are filled at the call. */
+/** Every interaction's subject; <store>, <index> and <tail> are filled at the call. */
 export const SUBJECTS = {
   ping: "CHRON.API.PING",
-  "log.create": "CHRON.API.LOG.CREATE",
+  "store.create": "CHRON.API.LOG.CREATE",
   "type.define": "CHRON.API.TYPE.DEFINE",
-  "thing.rollup": "CHRON.API.THING.ROLLUP",
+  "instance.snapshot": "CHRON.API.THING.ROLLUP",
   "index.declare": "CHRON.API.INDEX.DECLARE",
   "index.delete": "CHRON.API.INDEX.DELETE",
   "member.add": "CHRON.API.MEMBER.ADD",
   "member.revoke": "CHRON.API.MEMBER.REVOKE",
-  "index.query.search": "CHRON.API.INDEX.QUERY.<log>.<index>",
-  "index.query.graph.neighbors": "CHRON.API.INDEX.QUERY.<log>.<index>",
-  "index.query.graph.walk": "CHRON.API.INDEX.QUERY.<log>.<index>",
-  "index.query.semantic": "CHRON.API.INDEX.QUERY.<log>.<index>",
-  append: "CHRON.<log>.OPS.<thing>",
+  "index.query.search": "CHRON.API.INDEX.QUERY.<store>.<index>",
+  "index.query.graph.neighbors": "CHRON.API.INDEX.QUERY.<store>.<index>",
+  "index.query.graph.walk": "CHRON.API.INDEX.QUERY.<store>.<index>",
+  "index.query.semantic": "CHRON.API.INDEX.QUERY.<store>.<index>",
+  append: "CHRON.<store>.OPS.<tail>",
 } as const;
 
 /** Every interaction's shape. */
 export const INTERACTION_SHAPES = {
   ping: "request-reply",
-  "log.create": "request-reply",
+  "store.create": "request-reply",
   "type.define": "request-reply",
-  "thing.rollup": "request-reply",
+  "instance.snapshot": "request-reply",
   "index.declare": "request-reply",
   "index.delete": "request-reply",
   "member.add": "request-reply",
@@ -827,9 +850,9 @@ export const INTERACTION_SHAPES = {
   tail: "subscribe",
   "watch.state": "subscribe",
   "watch.declarations": "subscribe",
-  "list.logs": "subscribe",
+  "list.stores": "subscribe",
   "list.types": "subscribe",
   "list.indexes": "subscribe",
   "list.members": "subscribe",
-  "list.things": "subscribe",
+  "list.instances": "subscribe",
 } as const;

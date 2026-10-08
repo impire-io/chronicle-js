@@ -9,7 +9,7 @@ export {
   guardRetryLanded,
   judgeRecord,
   judgeSnapshot,
-  resolveTail,
+  resolveInstance,
   type FoldOutcome,
   type Judgement,
   type Resolution,

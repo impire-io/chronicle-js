@@ -1,8 +1,11 @@
 // The client: one account's sentences over one NATS connection — the SDK
-// contract (design 12) as the Go client implements it, in TypeScript.
-// Control verbs are request/reply; queries are streamed replies; appends
-// are guarded JetStream publishes; reads of data at rest are JetStream —
-// ordered consumers, KV scans and watches — never a node verb.
+// contract (design 12) as the Go client implements it, in TypeScript, in
+// the words of decision 0044: a store, its types, their instances named by
+// paths, children, snapshots. Control verbs are request/reply; queries are
+// streamed replies; writes are guarded JetStream publishes; reads of data
+// at rest are JetStream — ordered consumers, KV scans and watches — never
+// a node verb. Paths are converted to their stored tails here, once, at the
+// edge; subjects and keys never see a slash.
 import {
   credsAuthenticator,
   headers as natsHeaders,
@@ -27,25 +30,28 @@ import {
 } from "@nats-io/jetstream";
 import { Kvm, type KV } from "@nats-io/kv";
 import {
+  InstanceExistsError,
+  InstanceMovedError,
   NotFoundError,
   SchemaViolationError,
   StaleVersionError,
-  ThingExistsError,
-  ThingMovedError,
-  UndeclaredAspectError,
+  UndeclaredChildError,
   UndefinedOperationError,
 } from "./errors.js";
-import { guardRetryLanded, resolveTail, type Resolution } from "./contract/fold.js";
+import { guardRetryLanded, resolveInstance, type Resolution } from "./contract/fold.js";
 import {
   metaIndex,
-  metaLogType,
   metaMember,
+  metaStoreConfig,
+  metaStoreType,
   opsFilter,
   opsSubject,
+  pathTail,
   stateBucket,
   streamName,
-  validateLogName,
-  validateThing,
+  tailPath,
+  TAIL_SEPARATOR,
+  validateStoreName,
   validateTypeName,
 } from "./contract/names.js";
 import {
@@ -59,6 +65,7 @@ import {
   type Op,
   type OpDef,
   type StateValue,
+  type StoreConfig,
   type TypeRecord,
 } from "./contract/record.js";
 import { compileSchema } from "./contract/schema.js";
@@ -77,13 +84,14 @@ import {
   type IndexQuerySearchTrailer,
   type IndexQuerySemanticItem,
   type IndexQuerySemanticTrailer,
+  type InstanceSnapshotReply,
   type ListIndexesItem,
+  type ListInstancesItem,
   type ListMembersItem,
-  type LogCreateReply,
   type MemberAddReply,
   type MemberRevokeReply,
   type PingReply,
-  type ThingRollupReply,
+  type StoreCreateReply,
   type TypeDefineReply,
   type WatchDeclarationsItem,
 } from "./generated/contract.js";
@@ -92,7 +100,7 @@ import { request, requestStream, type CallOptions, type Streamed } from "./rpc.j
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** How long a bounded replay waits for each op, and for the whole replay. */
+/** How long a bounded history waits for each op, and for the whole read. */
 const REPLAY_WAIT_MS = 1_000;
 const REPLAY_BUDGET_MS = 20_000;
 
@@ -100,7 +108,7 @@ const REPLAY_BUDGET_MS = 20_000;
 export interface ConnectOptions {
   /** The websocket URL(s): wss://connect.chronicle.impire.dev, or `chronicle up`'s ws:// one. */
   servers: string | string[];
-  /** A .creds file's contents; the principal is its user JWT's name. */
+  /** A credential file's contents; the principal is its user JWT's name. */
   creds?: Uint8Array | string;
   /** An nkey seed; needs `author`, since an nkey carries no name. */
   nkeySeed?: Uint8Array | string;
@@ -114,7 +122,7 @@ export interface ConnectOptions {
   timeout?: number;
 }
 
-/** The principal a .creds file's user JWT names. */
+/** The principal a credential file's user JWT names. */
 export function principalFromCreds(creds: Uint8Array | string): string {
   const text = typeof creds === "string" ? creds : decoder.decode(creds);
   const jwt = /-----BEGIN NATS USER JWT-----\s*([^\s-]+)\s*-+END NATS USER JWT-+/.exec(text)?.[1];
@@ -160,29 +168,31 @@ export interface Ack {
 }
 
 /** Options for a write. */
-export interface AppendOptions {
+export interface ApplyOptions {
   /** The op IDs the writer had seen. */
   parents?: string[];
   /** The op ID; minted when absent, and kept across a retry. */
   opId?: string;
-  /** Guard the append: the thing's last op must be this sequence. */
+  /** The sequence of the instance's last operation; the write is refused if anything landed since. */
   expectedSeq?: number;
 }
 
 /** A type's definition (design 07 § types). */
 export interface TypeDefinition {
   schema: unknown;
+  /** The history policy: compactable (the default) or full. */
   history?: string;
-  aspects?: Record<string, string>;
+  /** Child name → type: what may be nested under an instance of this type. */
+  children?: Record<string, string>;
   operations?: Record<string, OpDef>;
 }
 
-/** Options for creating a log. */
-export interface LogOptions {
+/** Options for creating a store. */
+export interface StoreOptions {
   description?: string;
-  /** compactable (the default) or preserved. */
+  /** compactable (the default) or full. */
   history?: string;
-  /** The log's byte budget; absent means the account's default. */
+  /** The store's byte budget; absent means the account's default. */
   maxBytes?: number;
 }
 
@@ -209,6 +219,26 @@ export interface QueryOptions {
   signal?: AbortSignal;
 }
 
+/** How a listing of instances is narrowed (decision 0045 § 2). */
+export interface ListInstancesOptions {
+  /** Only instances of this type: top-level ones, or — with `under` — the children declared as it. */
+  type?: string;
+  /** Only the direct children of this instance, by path. */
+  under?: string;
+  /** Only instances whose state fields equal these values (scalars, compared as text; a dotted field walks nested objects). */
+  where?: Record<string, string | number | boolean | null>;
+}
+
+/** Options for adding a principal. */
+export interface MemberOptions {
+  /** The NATS user public key, where your NATS names users by key. */
+  publicKey?: string;
+  /** The person's GitHub user id, for signing in with GitHub. */
+  githubId?: number;
+  /** A person (member, the default) or a machine (service). */
+  kind?: "member" | "service";
+}
+
 /** A graph query: neighbors or walk, without the fields the SDK fills. */
 export type GraphQuery<R> = Omit<R, "principal" | "op">;
 
@@ -232,7 +262,7 @@ export class Client {
     this.#kvm = new Kvm(this.#js);
   }
 
-  /** Connects over a websocket. The principal is the creds' name, or `author`. */
+  /** Connects over a websocket. The principal is the credential's name, or `author`. */
   static async connect(opts: ConnectOptions): Promise<Client> {
     const author = opts.creds !== undefined ? principalFromCreds(opts.creds) : opts.author;
     if (author === undefined || author === "") {
@@ -268,35 +298,35 @@ export class Client {
     return request(this.#nc, SUBJECTS.ping, {}, opts);
   }
 
-  /** Creates a log. */
-  createLog(log: string, opts: LogOptions = {}): Promise<LogCreateReply> {
-    return request(this.#nc, SUBJECTS["log.create"], {
+  /** Creates a store. */
+  createStore(store: string, opts: StoreOptions = {}): Promise<StoreCreateReply> {
+    return request(this.#nc, SUBJECTS["store.create"], {
       principal: this.#author,
-      log,
+      store,
       ...(opts.description ? { description: opts.description } : {}),
       ...(opts.history ? { history: opts.history } : {}),
       ...(opts.maxBytes ? { max_bytes: opts.maxBytes } : {}),
     });
   }
 
-  /** Defines, or redefines, a type in a log. */
-  defineType(log: string, type: string, def: TypeDefinition): Promise<TypeDefineReply> {
+  /** Defines, or redefines, a type in a store. */
+  defineType(store: string, type: string, def: TypeDefinition): Promise<TypeDefineReply> {
     return request(this.#nc, SUBJECTS["type.define"], {
       principal: this.#author,
-      log,
+      store,
       type,
       schema: def.schema,
       ...(def.history ? { history: def.history } : {}),
-      ...(def.aspects ? { aspects: def.aspects } : {}),
+      ...(def.children ? { children: def.children } : {}),
       ...(def.operations ? { operations: def.operations } : {}),
     });
   }
 
-  /** Declares an index on a log. */
-  declareIndex(log: string, index: string, kind: string, config?: unknown): Promise<IndexDeclareReply> {
+  /** Declares an index on a store. */
+  declareIndex(store: string, index: string, kind: string, config?: unknown): Promise<IndexDeclareReply> {
     return request(this.#nc, SUBJECTS["index.declare"], {
       principal: this.#author,
-      log,
+      store,
       index,
       kind,
       ...(config === undefined || config === null ? {} : { config }),
@@ -304,77 +334,92 @@ export class Client {
   }
 
   /** Deletes an index declaration. */
-  deleteIndex(log: string, index: string): Promise<IndexDeleteReply> {
-    return request(this.#nc, SUBJECTS["index.delete"], { principal: this.#author, log, index });
+  deleteIndex(store: string, index: string): Promise<IndexDeleteReply> {
+    return request(this.#nc, SUBJECTS["index.delete"], { principal: this.#author, store, index });
   }
 
-  /** Asks the node to roll a thing's history up into one snapshot; declining is an answer. */
-  rollupThing(log: string, thing: string): Promise<ThingRollupReply> {
-    return request(this.#nc, SUBJECTS["thing.rollup"], { principal: this.#author, log, thing });
+  /**
+   * Asks chronicle to take a snapshot of the instance: write its current
+   * state as one entry and compact the history before it. Declining is an
+   * answer (`taken: false`, with the reason), not an error.
+   */
+  snapshot(store: string, path: string): Promise<InstanceSnapshotReply> {
+    pathTail(path);
+    return request(this.#nc, SUBJECTS["instance.snapshot"], {
+      principal: this.#author,
+      store,
+      instance: path,
+    });
   }
 
-  /** Adds a member to the account. */
-  addMember(
-    member: string,
-    role: string,
-    opts: { publicKey?: string; githubId?: number } = {},
-  ): Promise<MemberAddReply> {
+  /** Adds a member — a person — or, with `kind: "service"`, a service account. */
+  addMember(member: string, role: string, opts: MemberOptions = {}): Promise<MemberAddReply> {
     return request(this.#nc, SUBJECTS["member.add"], {
       principal: this.#author,
       member,
       role,
+      ...(opts.kind ? { kind: opts.kind } : {}),
       ...(opts.publicKey ? { public_key: opts.publicKey } : {}),
       ...(opts.githubId ? { github_id: opts.githubId } : {}),
     });
   }
 
-  /** Revokes a member. */
+  /** Adds a service account: a machine with a credential. */
+  addServiceAccount(
+    name: string,
+    role: string,
+    opts: Omit<MemberOptions, "kind" | "githubId"> = {},
+  ): Promise<MemberAddReply> {
+    return this.addMember(name, role, { ...opts, kind: "service" });
+  }
+
+  /** Removes a member, or revokes a service account: the registry entry goes. */
   revokeMember(member: string): Promise<MemberRevokeReply> {
     return request(this.#nc, SUBJECTS["member.revoke"], { principal: this.#author, member });
   }
 
   // --- queries: streamed replies -----------------------------------------
 
-  /** Queries a search index; empty text matches everything. */
+  /** Queries a search index; empty text matches everything. Hits name instances by path. */
   queryIndex(
-    log: string,
+    store: string,
     index: string,
     query: string,
     opts: QueryOptions = {},
   ): Streamed<IndexQuerySearchItem, IndexQuerySearchTrailer> {
     return requestStream(
       this.#nc,
-      querySubject(log, index),
+      querySubject(store, index),
       { principal: this.#author, query, ...(opts.limit ? { limit: opts.limit } : {}) },
       opts,
     );
   }
 
-  /** A thing's edges in a graph index. */
+  /** An instance's edges in a graph index. */
   graphNeighbors(
-    log: string,
+    store: string,
     index: string,
     q: GraphQuery<IndexQueryGraphNeighborsRequest>,
     opts: { signal?: AbortSignal } = {},
   ): Streamed<IndexQueryGraphNeighborsItem, IndexQueryGraphNeighborsTrailer> {
     return requestStream(
       this.#nc,
-      querySubject(log, index),
+      querySubject(store, index),
       { ...q, principal: this.#author, op: "neighbors" },
       opts,
     );
   }
 
-  /** The things reachable from a thing in a graph index. */
+  /** The instances reachable from an instance in a graph index. */
   graphWalk(
-    log: string,
+    store: string,
     index: string,
     q: GraphQuery<IndexQueryGraphWalkRequest>,
     opts: { signal?: AbortSignal } = {},
   ): Streamed<IndexQueryGraphWalkItem, IndexQueryGraphWalkTrailer> {
     return requestStream(
       this.#nc,
-      querySubject(log, index),
+      querySubject(store, index),
       { ...q, principal: this.#author, op: "walk" },
       opts,
     );
@@ -382,14 +427,14 @@ export class Client {
 
   /** Queries a semantic index by meaning. */
   querySemantic(
-    log: string,
+    store: string,
     index: string,
     text: string,
     opts: QueryOptions = {},
   ): Streamed<IndexQuerySemanticItem, IndexQuerySemanticTrailer> {
     return requestStream(
       this.#nc,
-      querySubject(log, index),
+      querySubject(store, index),
       { principal: this.#author, text, ...(opts.limit ? { limit: opts.limit } : {}) },
       opts,
     );
@@ -397,90 +442,114 @@ export class Client {
 
   // --- writes: guarded publishes ------------------------------------------
 
-  /** Births a thing by snapshot: its whole state, guarded at 0. */
-  async createThing(log: string, thing: string, state: unknown = {}, opts: AppendOptions = {}): Promise<Ack> {
-    validateLogName(log);
-    validateThing(thing);
+  /**
+   * Creates an instance from a snapshot of its whole state, only if it does
+   * not exist yet — the untyped form, and the application's own when it
+   * folds state itself. A typed instance is created with `create`.
+   */
+  async createFromSnapshot(
+    store: string,
+    path: string,
+    state: unknown = {},
+    opts: ApplyOptions = {},
+  ): Promise<Ack> {
+    validateStoreName(store);
+    const tail = pathTail(path);
     if (opts.expectedSeq !== undefined) {
-      throw new Error("expectedSeq: a birth guards at 0 by definition");
+      throw new Error("expectedSeq: a create expects no history by definition");
     }
-    await this.#preflightSnapshot(log, thing, state);
+    await this.#preflightSnapshot(store, tail, state);
     const payload = encoder.encode(JSON.stringify({ state, frontier: [] }));
-    return this.#publish(log, thing, SNAPSHOT, payload, opts, { guard: 0 }, (t) => new ThingExistsError(t));
-  }
-
-  /** Births a thing through one of its type's operations, guarded at 0. */
-  async createWith(
-    log: string,
-    thing: string,
-    opType: string,
-    payload: unknown = {},
-    opts: AppendOptions = {},
-  ): Promise<Ack> {
-    validateLogName(log);
-    validateThing(thing);
-    if (opType === "") {
-      throw new Error("op type: must not be empty");
-    }
-    if (opType === SNAPSHOT) {
-      throw new Error("create with snapshot: createThing is the snapshot birth");
-    }
-    if (opts.expectedSeq !== undefined) {
-      throw new Error("expectedSeq: a birth guards at 0 by definition");
-    }
-    const data = toBytes(payload);
-    await this.#preflightAppend(log, thing, opType, data);
-    return this.#publish(log, thing, opType, data, opts, { guard: 0 }, (t) => new ThingExistsError(t));
-  }
-
-  /** Appends an operation; with expectedSeq, guarded on the thing's last sequence. */
-  async append(
-    log: string,
-    thing: string,
-    opType: string,
-    payload: unknown,
-    opts: AppendOptions = {},
-  ): Promise<Ack> {
-    validateLogName(log);
-    validateThing(thing);
-    if (opType === "") {
-      throw new Error("op type: must not be empty");
-    }
-    const data = toBytes(payload);
-    await this.#preflightAppend(log, thing, opType, data);
     return this.#publish(
-      log,
-      thing,
-      opType,
-      data,
+      store,
+      tail,
+      SNAPSHOT,
+      payload,
       opts,
-      opts.expectedSeq === undefined ? {} : { guard: opts.expectedSeq },
-      (t) => new ThingMovedError(t),
+      { guard: 0 },
+      (t) => new InstanceExistsError(t),
     );
   }
 
-  /** Saves a version: a snapshot replacing the thing's history up to upTo, guarded there. */
-  async saveVersion(
-    log: string,
-    thing: string,
+  /**
+   * Creates an instance by applying one of its type's operations — `create`
+   * by convention — only if it does not exist yet. The data is checked
+   * against that operation's schema before anything is sent.
+   */
+  async create(
+    store: string,
+    path: string,
+    op = "create",
+    data: unknown = {},
+    opts: ApplyOptions = {},
+  ): Promise<Ack> {
+    validateStoreName(store);
+    const tail = pathTail(path);
+    if (op === "") {
+      throw new Error("operation: must not be empty");
+    }
+    if (op === SNAPSHOT) {
+      throw new Error("create with a snapshot: createFromSnapshot is that form");
+    }
+    if (opts.expectedSeq !== undefined) {
+      throw new Error("expectedSeq: a create expects no history by definition");
+    }
+    const bytesOf = toBytes(data);
+    await this.#preflightApply(store, tail, op, bytesOf);
+    return this.#publish(store, tail, op, bytesOf, opts, { guard: 0 }, (t) => new InstanceExistsError(t));
+  }
+
+  /**
+   * Applies an operation to an instance; with expectedSeq, refused if
+   * anything landed on the instance since that sequence.
+   */
+  async apply(store: string, path: string, op: string, data: unknown, opts: ApplyOptions = {}): Promise<Ack> {
+    validateStoreName(store);
+    const tail = pathTail(path);
+    if (op === "") {
+      throw new Error("operation: must not be empty");
+    }
+    const bytesOf = toBytes(data);
+    await this.#preflightApply(store, tail, op, bytesOf);
+    return this.#publish(
+      store,
+      tail,
+      op,
+      bytesOf,
+      opts,
+      opts.expectedSeq === undefined ? {} : { guard: opts.expectedSeq },
+      (t) => new InstanceMovedError(t),
+    );
+  }
+
+  /**
+   * Saves a snapshot the application materialised itself: it replaces the
+   * instance's history up to `upTo` (the sequence of the last operation the
+   * state covers), guarded there.
+   */
+  async saveSnapshot(
+    store: string,
+    path: string,
     state: unknown,
     frontier: string[],
     upTo: number,
-    opts: AppendOptions = {},
+    opts: ApplyOptions = {},
   ): Promise<Ack> {
-    validateLogName(log);
-    validateThing(thing);
+    validateStoreName(store);
+    const tail = pathTail(path);
     if (upTo <= 0) {
-      throw new Error("upTo: the seq of the last op the state covers; birth is createThing");
+      throw new Error(
+        "upTo: the sequence of the last operation the state covers; a first write is createFromSnapshot",
+      );
     }
     if (opts.expectedSeq !== undefined) {
-      throw new Error("expectedSeq: a save guards at upTo");
+      throw new Error("expectedSeq: a saved snapshot guards at upTo");
     }
-    await this.#preflightSnapshot(log, thing, state);
+    await this.#preflightSnapshot(store, tail, state);
     const payload = encoder.encode(JSON.stringify({ state, frontier }));
     return this.#publish(
-      log,
-      thing,
+      store,
+      tail,
       SNAPSHOT,
       payload,
       opts,
@@ -492,18 +561,18 @@ export class Client {
   /**
    * One publish: the op's headers, the guard, one in flight per subject;
    * after a guard refusal, the subject's last op says whether this op
-   * landed (dedup's echo) or the thing moved.
+   * landed (dedup's echo) or the instance moved.
    */
   async #publish(
-    log: string,
-    thing: string,
+    store: string,
+    tail: string,
     opType: string,
     payload: Uint8Array,
-    opts: AppendOptions,
+    opts: ApplyOptions,
     guard: { guard?: number; rollup?: boolean },
     refused: (what: string) => Error,
   ): Promise<Ack> {
-    const subject = opsSubject(log, thing);
+    const subject = opsSubject(store, tail);
     const opId = opts.opId ?? nuid.next();
     const h = natsHeaders();
     for (const [k, v] of opHeaders({
@@ -528,11 +597,11 @@ export class Client {
         return { opId, seq: ack.seq };
       } catch (err) {
         if (guard.guard !== undefined && guardRefused(err)) {
-          const last = await this.#lastOp(log, subject);
+          const last = await this.#lastOp(store, subject);
           if (guardRetryLanded(last?.id ?? "", opId)) {
             return { opId, seq: last?.seq ?? 0 };
           }
-          throw refused(`${thing} in ${log}`);
+          throw refused(`${tailPath(tail)} in store ${store}`);
         }
         throw err;
       }
@@ -558,10 +627,10 @@ export class Client {
   }
 
   /** The subject's last op: its ID and sequence; undefined when there is none. */
-  async #lastOp(log: string, subject: string): Promise<{ id: string; seq: number } | undefined> {
+  async #lastOp(store: string, subject: string): Promise<{ id: string; seq: number } | undefined> {
     this.#jsm ??= jetstreamManager(this.#nc);
     const jsm = await this.#jsm;
-    const msg = await jsm.streams.getMessage(streamName(log), { last_by_subj: subject });
+    const msg = await jsm.streams.getMessage(streamName(store), { last_by_subj: subject });
     if (msg === null) {
       return undefined;
     }
@@ -570,28 +639,31 @@ export class Client {
 
   // --- preflight: the type's rules, before anything is sent -----------------
 
-  /** Resolves a thing's tail against the log's types. */
-  async resolve(log: string, thing: string): Promise<Resolution> {
-    validateLogName(log);
-    validateThing(thing);
+  /** Resolves an instance's path against the store's types. */
+  async resolve(store: string, path: string): Promise<Resolution> {
+    validateStoreName(store);
+    return this.#resolveTail(store, pathTail(path));
+  }
+
+  async #resolveTail(store: string, tail: string): Promise<Resolution> {
     const meta = await this.#bucket(GRAMMARS.metaBucket);
-    return resolveTail(thing, async (name) => {
-      const entry = await meta.get(metaLogType(log, name));
+    return resolveInstance(tail, async (name) => {
+      const entry = await meta.get(metaStoreType(store, name));
       return entry && entry.operation === "PUT" ? entry.json<TypeRecord>() : undefined;
     });
   }
 
-  async #preflightAppend(log: string, thing: string, opType: string, payload: Uint8Array): Promise<void> {
+  async #preflightApply(store: string, tail: string, opType: string, payload: Uint8Array): Promise<void> {
     if (opType === SNAPSHOT) {
       const snap = parseJSON(payload);
       if (snap.ok && isRecord(snap.value)) {
-        await this.#preflightSnapshot(log, thing, snap.value.state);
+        await this.#preflightSnapshot(store, tail, snap.value.state);
       }
       return;
     }
-    const res = await this.resolve(log, thing);
+    const res = await this.#resolveTail(store, tail);
     if (res.kind === "undeclared") {
-      throw new UndeclaredAspectError(res.detail);
+      throw new UndeclaredChildError(res.detail);
     }
     if (res.kind !== "typed") {
       return;
@@ -599,89 +671,103 @@ export class Client {
     const def = res.record.operations?.[opType];
     if (def === undefined) {
       throw new UndefinedOperationError(
-        `type ${JSON.stringify(res.typeName)} defines no operation ${JSON.stringify(opType)}`,
+        `${res.typeName} defines no operation ${JSON.stringify(opType)}. It defines: ${Object.keys(
+          res.record.operations ?? {},
+        )
+          .sort()
+          .join(", ")}`,
       );
     }
     const parsed = parseJSON(payload);
     if (!parsed.ok) {
-      throw new SchemaViolationError(`payload is not JSON: ${parsed.detail}`);
+      throw new SchemaViolationError(`the data is not JSON: ${parsed.detail}`);
     }
     const failed = compileSchema(def.schema)(parsed.value);
     if (failed !== "") {
-      throw new SchemaViolationError(`${log} ${opType}: ${failed}`);
+      throw new SchemaViolationError(`the data does not fit ${opType}'s schema: ${failed}`);
     }
   }
 
-  async #preflightSnapshot(log: string, thing: string, state: unknown): Promise<void> {
-    const res = await this.resolve(log, thing);
+  async #preflightSnapshot(store: string, tail: string, state: unknown): Promise<void> {
+    const res = await this.#resolveTail(store, tail);
     if (res.kind === "undeclared") {
-      throw new UndeclaredAspectError(res.detail);
+      throw new UndeclaredChildError(res.detail);
     }
     if (res.kind !== "typed" || res.record.schema === undefined) {
       return;
     }
     const failed = compileSchema(res.record.schema)(state);
     if (failed !== "") {
-      throw new SchemaViolationError(`${log} ${res.typeName}: state fails the thing schema: ${failed}`);
+      throw new SchemaViolationError(`state fails ${res.typeName}'s schema: ${failed}`);
     }
   }
 
   // --- single values: replies at rest ---------------------------------------
 
-  /** A thing's folded state and the sequence it covers. */
-  async state(log: string, thing: string): Promise<StateValue> {
-    validateLogName(log);
-    validateThing(thing);
-    const entry = await (await this.#bucket(stateBucket(log))).get(thing);
+  /** An instance's state and the sequence it stands at. */
+  async state(store: string, path: string): Promise<StateValue> {
+    validateStoreName(store);
+    const tail = pathTail(path);
+    const entry = await (await this.#bucket(stateBucket(store))).get(tail);
     if (!entry || entry.operation !== "PUT") {
-      throw new NotFoundError(`no state for thing: ${thing} in ${log}`);
+      throw new NotFoundError(`no state for ${path} in store ${store}`);
     }
     return entry.json<StateValue>();
   }
 
-  /** A type's record. */
-  async getType(log: string, type: string): Promise<TypeRecord> {
-    validateLogName(log);
-    validateTypeName(type);
-    const entry = await (await this.#bucket(GRAMMARS.metaBucket)).get(metaLogType(log, type));
+  /** A store's settings. */
+  async getStore(store: string): Promise<StoreConfig> {
+    validateStoreName(store);
+    const entry = await (await this.#bucket(GRAMMARS.metaBucket)).get(metaStoreConfig(store));
     if (!entry || entry.operation !== "PUT") {
-      throw new NotFoundError(`type is not defined: ${type} in ${log}`);
+      throw new NotFoundError(`store does not exist: ${store}`);
+    }
+    return entry.json<StoreConfig>();
+  }
+
+  /** A type's record. */
+  async getType(store: string, type: string): Promise<TypeRecord> {
+    validateStoreName(store);
+    validateTypeName(type);
+    const entry = await (await this.#bucket(GRAMMARS.metaBucket)).get(metaStoreType(store, type));
+    if (!entry || entry.operation !== "PUT") {
+      throw new NotFoundError(`type is not defined: ${type} in store ${store}`);
     }
     return entry.json<TypeRecord>();
   }
 
   /** An index's declaration. */
-  async getIndexDeclaration(log: string, index: string): Promise<IndexDeclaration> {
-    validateLogName(log);
-    const entry = await (await this.#bucket(GRAMMARS.metaBucket)).get(metaIndex(log, index));
+  async getIndexDeclaration(store: string, index: string): Promise<IndexDeclaration> {
+    validateStoreName(store);
+    const entry = await (await this.#bucket(GRAMMARS.metaBucket)).get(metaIndex(store, index));
     if (!entry || entry.operation !== "PUT") {
-      throw new NotFoundError(`index is not declared: ${index} in ${log}`);
+      throw new NotFoundError(`index is not declared: ${index} in store ${store}`);
     }
     return entry.json<IndexDeclaration>();
   }
 
   // --- collections at rest: KV scans ----------------------------------------
 
-  /** The account's logs. */
-  async *listLogs(): AsyncGenerator<string> {
+  /** The account's stores. */
+  async *listStores(): AsyncGenerator<string> {
     for await (const key of this.#keys(GRAMMARS.metaBucket, "log.*.config")) {
       yield key.slice("log.".length, -".config".length);
     }
   }
 
-  /** A log's types. */
-  async *listTypes(log: string): AsyncGenerator<string> {
-    validateLogName(log);
-    const prefix = metaLogType(log, "");
+  /** A store's types. */
+  async *listTypes(store: string): AsyncGenerator<string> {
+    validateStoreName(store);
+    const prefix = metaStoreType(store, "");
     for await (const key of this.#keys(GRAMMARS.metaBucket, `${prefix}*`)) {
       yield key.slice(prefix.length);
     }
   }
 
-  /** A log's indexes and their declarations. */
-  async *listIndexes(log: string): AsyncGenerator<ListIndexesItem> {
-    validateLogName(log);
-    const prefix = metaIndex(log, "");
+  /** A store's indexes and their declarations. */
+  async *listIndexes(store: string): AsyncGenerator<ListIndexesItem> {
+    validateStoreName(store);
+    const prefix = metaIndex(store, "");
     const meta = await this.#bucket(GRAMMARS.metaBucket);
     for await (const key of this.#keys(GRAMMARS.metaBucket, `${prefix}*`)) {
       const entry = await meta.get(key);
@@ -697,7 +783,7 @@ export class Client {
     }
   }
 
-  /** The account's members. */
+  /** The account's members and service accounts; `kind` tells them apart. */
   async *listMembers(): AsyncGenerator<ListMembersItem> {
     const prefix = metaMember("");
     const meta = await this.#bucket(GRAMMARS.metaBucket);
@@ -707,27 +793,68 @@ export class Client {
       if (name === "" || !entry || entry.operation !== "PUT") {
         continue;
       }
-      const m = entry.json<Pick<ListMembersItem, "role" | "public_key" | "github_id">>();
+      const m = entry.json<Pick<ListMembersItem, "role" | "kind" | "public_key" | "github_id">>();
       yield {
         name,
         role: m.role,
+        kind: m.kind ?? "member",
         ...(m.public_key ? { public_key: m.public_key } : {}),
         ...(m.github_id ? { github_id: m.github_id } : {}),
       };
     }
   }
 
-  /** A log's things with state, narrowed to a prefix and its descendants. */
-  async *listThings(log: string, prefix = ""): AsyncGenerator<string> {
-    validateLogName(log);
-    for await (const key of this.#keys(stateBucket(log), ">")) {
+  /**
+   * A store's instances from its state: every one at every level, or
+   * narrowed by type, to a parent's direct children, and by a field
+   * filter — a bucket scan with the filter on this side (decision 0045).
+   */
+  async *listInstances(store: string, opts: ListInstancesOptions = {}): AsyncGenerator<ListInstancesItem> {
+    validateStoreName(store);
+    const underTail = opts.under === undefined ? undefined : pathTail(opts.under);
+    const underDepth = underTail === undefined ? 0 : underTail.split(TAIL_SEPARATOR).length;
+    // Under a parent, a type narrows by the parent's children map.
+    let childNames: Set<string> | undefined;
+    if (underTail !== undefined && opts.type !== undefined) {
+      const res = await this.#resolveTail(store, underTail);
+      childNames = new Set(
+        res.kind === "typed"
+          ? Object.entries(res.record.children ?? {})
+              .filter(([, t]) => t === opts.type)
+              .map(([name]) => name)
+          : [],
+      );
+    }
+    const kv = await this.#bucket(stateBucket(store));
+    const where = Object.entries(opts.where ?? {});
+    for await (const key of this.#keys(stateBucket(store), ">")) {
       if (key === GRAMMARS.stateFoldKey) {
         continue;
       }
-      if (prefix !== "" && key !== prefix && !key.startsWith(`${prefix}.`)) {
+      const toks = key.split(TAIL_SEPARATOR);
+      if (underTail !== undefined) {
+        if (!key.startsWith(`${underTail}${TAIL_SEPARATOR}`) || toks.length !== underDepth + 2) {
+          continue;
+        }
+        if (childNames !== undefined && !childNames.has(toks[toks.length - 2] ?? "")) {
+          continue;
+        }
+      } else if (opts.type !== undefined && (toks.length !== 2 || toks[0] !== opts.type)) {
         continue;
       }
-      yield key;
+      const entry = await kv.get(key);
+      if (!entry || entry.operation !== "PUT") {
+        continue;
+      }
+      const sv = entry.json<StateValue>();
+      if (where.length > 0 && !matches(sv.state, where)) {
+        continue;
+      }
+      const type =
+        underTail !== undefined
+          ? ((childNames !== undefined ? opts.type : undefined) ?? toks[toks.length - 2] ?? "")
+          : (toks[0] ?? "");
+      yield { path: tailPath(key), type, seq: sv.seq, state: sv.state };
     }
   }
 
@@ -756,38 +883,33 @@ export class Client {
 
   // --- history: ordered consumers --------------------------------------------
 
-  /** A thing's history, from its first op to the head observed at the start. */
-  replay(log: string, thing: string): AsyncGenerator<Op> {
-    validateLogName(log);
-    validateThing(thing);
-    return this.#ops(log, opsSubject(log, thing), { bounded: true });
+  /** An instance's history, from its first operation to the head observed at the start. */
+  history(store: string, path: string): AsyncGenerator<Op> {
+    validateStoreName(store);
+    return this.#ops(store, opsSubject(store, pathTail(path)), { bounded: true });
   }
 
-  /** A thing's ops after a sequence, to the head observed at the start. */
-  foldTail(log: string, thing: string, after: number): AsyncGenerator<Op> {
-    validateLogName(log);
-    validateThing(thing);
-    return this.#ops(log, opsSubject(log, thing), { bounded: true, after });
+  /** An instance's operations after a sequence, to the head observed at the start. */
+  foldTail(store: string, path: string, after: number): AsyncGenerator<Op> {
+    validateStoreName(store);
+    return this.#ops(store, opsSubject(store, pathTail(path)), { bounded: true, after });
   }
 
-  /** The live tail of a log, or of one thing when thing is not empty; never ends on its own. */
-  tail(log: string, thing = "", opts: TailOptions = {}): AsyncGenerator<Op> {
-    validateLogName(log);
-    if (thing !== "") {
-      validateThing(thing);
-    }
-    return this.#ops(log, thing === "" ? opsFilter(log) : opsSubject(log, thing), {
+  /** The live tail of a store, or of one instance when path is not empty; never ends on its own. */
+  tail(store: string, path = "", opts: TailOptions = {}): AsyncGenerator<Op> {
+    validateStoreName(store);
+    return this.#ops(store, path === "" ? opsFilter(store) : opsSubject(store, pathTail(path)), {
       ...opts,
       bounded: false,
     });
   }
 
   async *#ops(
-    log: string,
+    store: string,
     subject: string,
     o: { bounded: boolean; after?: number; live?: boolean; signal?: AbortSignal },
   ): AsyncGenerator<Op> {
-    const consumer = await this.#js.consumers.get(streamName(log), {
+    const consumer = await this.#js.consumers.get(streamName(store), {
       filter_subjects: [subject],
       ...(o.live
         ? { deliver_policy: DeliverPolicy.New }
@@ -808,12 +930,12 @@ export class Client {
 
   // --- the live surface: KV watches ----------------------------------------------
 
-  /** A thing's state: the current value, then every change; never ends on its own. */
-  async *watch(log: string, thing: string, opts: LiveOptions = {}): AsyncGenerator<StateValue> {
-    validateLogName(log);
-    validateThing(thing);
-    const kv = await this.#bucket(stateBucket(log));
-    const w = await kv.watch({ key: thing, ignoreDeletes: true });
+  /** An instance's state: the current value, then every change; never ends on its own. */
+  async *watch(store: string, path: string, opts: LiveOptions = {}): AsyncGenerator<StateValue> {
+    validateStoreName(store);
+    const tail = pathTail(path);
+    const kv = await this.#bucket(stateBucket(store));
+    const w = await kv.watch({ key: tail, ignoreDeletes: true });
     const stop = () => {
       w.stop();
     };
@@ -831,11 +953,11 @@ export class Client {
     }
   }
 
-  /** A log's type records and index declarations: every one at rest, then every change. */
-  async *watchDeclarations(log: string, opts: LiveOptions = {}): AsyncGenerator<Declaration> {
-    validateLogName(log);
-    const typePrefix = metaLogType(log, "");
-    const indexPrefix = metaIndex(log, "");
+  /** A store's type records and index declarations: every one at rest, then every change. */
+  async *watchDeclarations(store: string, opts: LiveOptions = {}): AsyncGenerator<Declaration> {
+    validateStoreName(store);
+    const typePrefix = metaStoreType(store, "");
+    const indexPrefix = metaIndex(store, "");
     const kv = await this.#bucket(GRAMMARS.metaBucket);
     const w = await kv.watch({ key: [`${typePrefix}*`, `${indexPrefix}*`] });
     const stop = () => {
@@ -863,8 +985,8 @@ export class Client {
   }
 }
 
-function querySubject(log: string, index: string): string {
-  return SUBJECTS["index.query.search"].replace("<log>", log).replace("<index>", index);
+function querySubject(store: string, index: string): string {
+  return SUBJECTS["index.query.search"].replace("<store>", store).replace("<index>", index);
 }
 
 /** A payload as bytes: raw bytes pass as they are, anything else is JSON. */
@@ -881,6 +1003,29 @@ function parseJSON(raw: Uint8Array): { ok: true; value: unknown } | { ok: false;
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Every where clause holds on the state: the field exists and renders to the value's text. */
+function matches(state: unknown, where: [string, string | number | boolean | null][]): boolean {
+  if (!isRecord(state)) {
+    return false;
+  }
+  for (const [field, value] of where) {
+    let cur: unknown = state;
+    for (const seg of field.split(".")) {
+      if (!isRecord(cur) || !(seg in cur)) {
+        return false;
+      }
+      cur = cur[seg];
+    }
+    if (isRecord(cur) || Array.isArray(cur)) {
+      return false;
+    }
+    if (String(cur) !== String(value)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function guardRefused(err: unknown): boolean {
@@ -906,7 +1051,7 @@ async function* bounded(consumer: Consumer): AsyncGenerator<Op> {
     let msg = await consumer.next({ expires: REPLAY_WAIT_MS });
     while (msg === null) {
       if (Date.now() > deadline) {
-        throw new Error("replay next: timed out");
+        throw new Error("history: timed out waiting for the next operation");
       }
       if ((await consumer.info()).num_pending === 0) {
         return;

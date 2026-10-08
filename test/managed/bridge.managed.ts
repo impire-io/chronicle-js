@@ -136,9 +136,9 @@ describe("the bridge over the websocket, against the managed fleet", () => {
       });
       try {
         expect(c.author).toBe(created.admin);
-        await c.createLog("panel", { description: "written from a browser's transport" });
+        await c.createStore("panel", { description: "written from a browser's transport" });
         const logs: string[] = [];
-        for await (const log of c.listLogs()) logs.push(log);
+        for await (const store of c.listStores()) logs.push(store);
         expect(logs).toContain("panel");
       } finally {
         await c.close();
