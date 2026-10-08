@@ -24,7 +24,10 @@ export async function up(): Promise<Up> {
   const child: ChildProcess = spawn(
     chronicleBinary,
     ["up", "--dir", dir, "--port", "-1", "--websocket-port", "-1"],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, CHRONICLE_CONFIG_HOME: join(dir, "config") },
+    },
   );
   let output = "";
   child.stdout?.on("data", (d: Buffer) => (output += d.toString()));

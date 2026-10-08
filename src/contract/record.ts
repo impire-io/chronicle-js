@@ -97,7 +97,7 @@ export function rfc3339(date: Date): string {
   return `${whole ?? ""}${trimmed === "" ? "" : `.${trimmed}`}Z`;
 }
 
-/** A thing's folded state as the state bucket holds it. */
+/** An instance's state as the state bucket holds it. */
 export interface StateValue {
   /** The last op the state covers. */
   seq: number;
@@ -115,23 +115,34 @@ export interface Snapshot {
 export interface OpDef {
   /** The JSON Schema the payload must pass. */
   schema: unknown;
-  /** What the op does to state: merge, or none. Absent means none. */
+  /** What applying it does to the state: merge (updates it) or none (recorded in history only). Always stated; absent reads as none. */
   effect?: string;
 }
 
-/** A type record, as META holds it under log.<log>.type.<type>. */
+/** A type record, as META holds it under log.<store>.type.<type>. */
 export interface TypeRecord {
   revision: number;
-  /** The thing's JSON Schema; absent means no constraint. */
+  /** The instance's JSON Schema; absent means no constraint. */
   schema?: unknown;
+  /** The history policy: compactable (the default) or full. */
   history?: string;
-  /** Aspect segment → the type its things carry. */
-  aspects?: Record<string, string>;
+  /** Child name → the type of the instances nested under that name. */
+  children?: Record<string, string>;
   operations?: Record<string, OpDef>;
 }
 
-/** An index declaration, as META holds it under index.<log>.<index>. */
+/** An index declaration, as META holds it under index.<store>.<index>. */
 export interface IndexDeclaration {
   kind: string;
   config?: unknown;
+}
+
+/** A store's settings, as META holds them under log.<store>.config. */
+export interface StoreConfig {
+  status: string;
+  description?: string;
+  /** The store's byte budget; absent means the account's default. */
+  max_bytes?: number;
+  /** The history policy: compactable (the default) or full. */
+  history?: string;
 }

@@ -33,7 +33,7 @@ const constant = (name, doc, value) => {
 constant("SHAPES", "The interaction shapes the contract describes.", contract.shapes);
 constant("HEADERS", "The headers the wire speaks.", contract.headers);
 constant("GRAMMARS", "Name grammars, derivations, META keys and vocabularies.", contract.grammars);
-constant("STREAM_SETTINGS", "Settings every log stream carries.", contract.streamSettings);
+constant("STREAM_SETTINGS", "Settings every store's stream carries.", contract.streamSettings);
 constant("CLIENT_DEFAULTS", "The defaults a client applies.", contract.clientDefaults);
 constant("FOLD", "The fold step's decisions and rules.", contract.fold);
 
@@ -84,7 +84,7 @@ for (const it of contract.interactions) {
 }
 constant(
   "SUBJECTS",
-  "Every interaction's subject; <log>, <index> and <thing> are filled at the call.",
+  "Every interaction's subject; <store>, <index> and <tail> are filled at the call.",
   subjects,
 );
 out.push(

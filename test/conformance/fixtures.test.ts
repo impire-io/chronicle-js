@@ -10,7 +10,7 @@ import {
   mergePatch,
   opHeaders,
   parseOpHeaders,
-  resolveTail,
+  resolveInstance,
   type NameKind,
   type OpHeaderFields,
   type TypeRecord,
@@ -41,17 +41,18 @@ describe("names.json", () => {
 
 describe("derivations.json", () => {
   interface Case {
-    log: string;
-    thing: string;
+    store: string;
+    tail: string;
+    path: string;
     upper: string;
     stream: string;
     stateBucket: string;
-    logSubjects: string;
+    storeSubjects: string;
     opsFilter: string;
     opsSubject: string;
     opsPrefix: string;
-    thingFromSubject: string;
-    metaLogConfig: string;
+    instanceFromSubject: string;
+    metaStoreConfig: string;
     metaType: { type: string; key: string };
     metaIndex: { index: string; key: string };
   }
@@ -61,18 +62,20 @@ describe("derivations.json", () => {
       invite: { digest: string; key: string };
     };
   }>("fixtures", "derivations.json");
-  it.each(fx.cases)("$log / $thing", (c) => {
-    expect(names.upperLog(c.log)).toBe(c.upper);
-    expect(names.streamName(c.log)).toBe(c.stream);
-    expect(names.stateBucket(c.log)).toBe(c.stateBucket);
-    expect(names.logSubjects(c.log)).toBe(c.logSubjects);
-    expect(names.opsFilter(c.log)).toBe(c.opsFilter);
-    expect(names.opsSubject(c.log, c.thing)).toBe(c.opsSubject);
-    expect(names.opsPrefix(c.log)).toBe(c.opsPrefix);
-    expect(names.thingFromSubject(c.log, c.opsSubject)).toBe(c.thingFromSubject);
-    expect(names.metaLogConfig(c.log)).toBe(c.metaLogConfig);
-    expect(names.metaLogType(c.log, c.metaType.type)).toBe(c.metaType.key);
-    expect(names.metaIndex(c.log, c.metaIndex.index)).toBe(c.metaIndex.key);
+  it.each(fx.cases)("$store / $path", (c) => {
+    expect(names.pathTail(c.path)).toBe(c.tail);
+    expect(names.tailPath(c.tail)).toBe(c.path);
+    expect(names.upperStore(c.store)).toBe(c.upper);
+    expect(names.streamName(c.store)).toBe(c.stream);
+    expect(names.stateBucket(c.store)).toBe(c.stateBucket);
+    expect(names.storeSubjects(c.store)).toBe(c.storeSubjects);
+    expect(names.opsFilter(c.store)).toBe(c.opsFilter);
+    expect(names.opsSubject(c.store, c.tail)).toBe(c.opsSubject);
+    expect(names.opsPrefix(c.store)).toBe(c.opsPrefix);
+    expect(names.instanceFromSubject(c.store, c.opsSubject)).toBe(c.instanceFromSubject);
+    expect(names.metaStoreConfig(c.store)).toBe(c.metaStoreConfig);
+    expect(names.metaStoreType(c.store, c.metaType.type)).toBe(c.metaType.key);
+    expect(names.metaIndex(c.store, c.metaIndex.index)).toBe(c.metaIndex.key);
   });
   it("identity keys", () => {
     expect(names.metaPrincipal(fx.identity.principal.id)).toBe(fx.identity.principal.key);
@@ -110,12 +113,12 @@ type Types = Record<string, TypeRecord>;
 const lookupIn = (types: Types) => (name: string) => types[name];
 
 describe("resolve.json", () => {
-  const fx = suiteFile<{ types: Types; cases: { thing: string; kind: string; type?: string }[] }>(
+  const fx = suiteFile<{ types: Types; cases: { tail: string; kind: string; type?: string }[] }>(
     "fixtures",
     "resolve.json",
   );
-  it.each(fx.cases)("$thing → $kind", async ({ thing, kind, type }) => {
-    const res = await resolveTail(thing, lookupIn(fx.types));
+  it.each(fx.cases)("$tail → $kind", async ({ tail, kind, type }) => {
+    const res = await resolveInstance(tail, lookupIn(fx.types));
     expect(res.kind).toBe(kind);
     if (res.kind === "typed") {
       expect(res.typeName).toBe(type);
@@ -126,14 +129,14 @@ describe("resolve.json", () => {
 describe("fold.json", () => {
   interface Case {
     name: string;
-    thing: string;
+    tail: string;
     ops: { type: string; payload?: unknown; raw?: string }[];
     decisions: string[];
     state: unknown;
   }
   const fx = suiteFile<{ types: Types; cases: Case[] }>("fixtures", "fold.json");
-  it.each(fx.cases)("$name", async ({ thing, ops, decisions, state }) => {
-    const res = await resolveTail(thing, lookupIn(fx.types));
+  it.each(fx.cases)("$name", async ({ tail, ops, decisions, state }) => {
+    const res = await resolveInstance(tail, lookupIn(fx.types));
     let current: unknown = undefined;
     const got: string[] = [];
     for (const op of ops) {
