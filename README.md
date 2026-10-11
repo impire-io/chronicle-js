@@ -1,15 +1,17 @@
 # chronicle-js
 
-The TypeScript SDK for [chronicle](https://github.com/impire-io/chronicle):
+The TypeScript SDK for [chronicle](https://github.com/impire-io/chronicle)
+— a datastore as a service where the writes are the record:
 `@impire-io/chronicle`. It speaks chronicle's SDK contract over
 [nats.js](https://github.com/nats-io/nats.js), in the browser through a
 websocket and in Node, in the words of chronicle's
 [vocabulary](https://github.com/impire-io/chronicle-hq/blob/main/00-META/vocabulary.md):
 a **store** holds **types**; you create **instances** of a type, named by a
 **path** (`type/id`, then `name/id` for each **child**); every change is an
-**operation** applied to an instance and kept in its **history**; the
-current **state** is one read away; the **indexes** you declare are kept
-current from the history.
+**operation** applied to an instance and kept in its **history** —
+replayable, nothing lost to an update; the current **state** is derived
+from it, one read away; the **indexes** you declare are derived from the
+same history.
 
 ```sh
 npm install @impire-io/chronicle
