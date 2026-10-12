@@ -69,6 +69,17 @@ await id.close();
 const c = await connectBridge({ ...auth, account });
 ```
 
+An admin of an account issues a service account's credential on the same
+plane, and gets it back exactly once; `rotateServiceAccount` hands down a
+new credential for the same service account (the old one no longer
+connects) and `revokeServiceAccount` kills it:
+
+```ts
+const id = await connectIdentity(auth);
+const { creds } = await id.issueServiceAccount(account, "billing-svc", "writer");
+await id.close();
+```
+
 ## The sentences
 
 Collections are async iterables; single values are replies
