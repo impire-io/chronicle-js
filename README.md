@@ -27,7 +27,7 @@ from the suite's last result, never edited by hand:
 
 | SDK                          | Contract | Suite (chronicle release) | Fixtures     | Scenarios   | Supports |
 | ---------------------------- | -------- | ------------------------- | ------------ | ----------- | -------- |
-| `@impire-io/chronicle` 0.2.0 | 2.0.0    | v0.4.0                    | ✅ 83 passed | ✅ 2 passed | yes      |
+| `@impire-io/chronicle` 0.3.0 | 2.0.0    | v0.4.0                    | ✅ 83 passed | ✅ 2 passed | yes      |
 
 <!-- support-matrix:end -->
 
@@ -67,6 +67,17 @@ const account = memberships[0]?.account ?? (await id.createAccount()).name;
 await id.close();
 
 const c = await connectBridge({ ...auth, account });
+```
+
+An admin of an account issues a service account's credential on the same
+plane, and gets it back exactly once; `rotateServiceAccount` hands down a
+new credential for the same service account (the old one no longer
+connects) and `revokeServiceAccount` kills it:
+
+```ts
+const id = await connectIdentity(auth);
+const { creds } = await id.issueServiceAccount(account, "billing-svc", "writer");
+await id.close();
 ```
 
 ## The sentences

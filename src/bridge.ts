@@ -7,6 +7,12 @@
 // open contract's client half of the bridge (decision 0043) — the same one
 // the Go module's bridge package speaks; the callout that answers it is
 // the managed service's, and an install without one connects with creds.
+// An admin of an account issues, rotates and revokes a service account's
+// credential on the same plane (chronicle-hq decision
+// 03-DECISIONS/0052-an-admin-issues-and-rotates-service-account-credentials-through-the-identity-plane.md,
+// design 02-DESIGN/08-browser-identity.md § the identity plane, at
+// chronicle-hq commit 5c1d258): the console speaks these from its Members
+// page on a placement opened for the one request and closed after.
 import type { NatsConnection } from "@nats-io/nats-core";
 import { Client, dial } from "./client.js";
 import { request, type CallOptions } from "./rpc.js";
@@ -64,6 +70,18 @@ export const identityMembershipsSubject = (githubId: number, login: string): str
 /** The subject an identity creates an account on. */
 export const identityAccountCreateSubject = (githubId: number, login: string): string =>
   `${IDENTITY_ROOT}ACCOUNT.CREATE.${githubId}.${login}`;
+
+/** The subject an admin issues a service account's credential on. */
+export const identityServiceAccountIssueSubject = (githubId: number, login: string): string =>
+  `${IDENTITY_ROOT}SERVICE_ACCOUNT.ISSUE.${githubId}.${login}`;
+
+/** The subject an admin rotates a service account's credential on. */
+export const identityServiceAccountRotateSubject = (githubId: number, login: string): string =>
+  `${IDENTITY_ROOT}SERVICE_ACCOUNT.ROTATE.${githubId}.${login}`;
+
+/** The subject an admin revokes a service account's credential on. */
+export const identityServiceAccountRevokeSubject = (githubId: number, login: string): string =>
+  `${IDENTITY_ROOT}SERVICE_ACCOUNT.REVOKE.${githubId}.${login}`;
 
 /** Recovers the identity a placement's publish permission names; undefined when it names none. */
 export function identityFromSubject(subject: string): { githubId: number; login: string } | undefined {
@@ -178,7 +196,33 @@ export interface IdentityAccountCreated {
   plan: string;
 }
 
-/** A placement in the identity plane: where a login learns its accounts and creates its first. */
+/** A service account's credential, handed down once: issued or rotated by an admin of its account. */
+export interface ServiceAccountCredential {
+  /** The account the service account belongs to. */
+  account: string;
+  /** The service account's name. */
+  name: string;
+  /** Its role: admin, writer or reader. */
+  role: string;
+  /** The public key the credential carries — what the account's registry records. */
+  public_key: string;
+  /** The credential file, in full; the service keeps no copy. */
+  creds: string;
+}
+
+/** A service account's credential, revoked: it no longer connects. */
+export interface ServiceAccountRevoked {
+  account: string;
+  name: string;
+  /** The public key that was revoked. */
+  public_key: string;
+}
+
+/**
+ * A placement in the identity plane: where a login learns its accounts and
+ * creates its first, and where an admin issues, rotates and revokes the
+ * credentials of the service accounts in an account it administers.
+ */
 export class Identity {
   readonly #nc: NatsConnection;
 
@@ -211,6 +255,59 @@ export class Identity {
         timeout: 60_000,
         ...opts,
       },
+    );
+  }
+
+  /**
+   * Issues a service account's credential in an account this identity
+   * administers: a new service account with the role, or a registered
+   * one that holds no credential yet. The credential comes back exactly
+   * once. A service account that already holds one is refused
+   * (`credential-exists`): rotate it instead.
+   */
+  issueServiceAccount(
+    account: string,
+    name: string,
+    role: string,
+    opts: CallOptions = {},
+  ): Promise<ServiceAccountCredential> {
+    return request<ServiceAccountCredential>(
+      this.#nc,
+      identityServiceAccountIssueSubject(this.githubId, this.login),
+      { account, name, role },
+      { timeout: 30_000, ...opts },
+    );
+  }
+
+  /**
+   * Rotates a service account's credential: the one it connects with now
+   * stops working, and a new one for the same service account, with the
+   * same role, comes back exactly once.
+   */
+  rotateServiceAccount(
+    account: string,
+    name: string,
+    opts: CallOptions = {},
+  ): Promise<ServiceAccountCredential> {
+    return request<ServiceAccountCredential>(
+      this.#nc,
+      identityServiceAccountRotateSubject(this.githubId, this.login),
+      { account, name },
+      { timeout: 30_000, ...opts },
+    );
+  }
+
+  /** Revokes a service account: its credential stops working first, then the service account is removed. */
+  revokeServiceAccount(
+    account: string,
+    name: string,
+    opts: CallOptions = {},
+  ): Promise<ServiceAccountRevoked> {
+    return request<ServiceAccountRevoked>(
+      this.#nc,
+      identityServiceAccountRevokeSubject(this.githubId, this.login),
+      { account, name },
+      { timeout: 30_000, ...opts },
     );
   }
 

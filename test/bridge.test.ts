@@ -3,13 +3,18 @@
 // path is test/managed/bridge.managed.ts, run with `make test-managed`.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { headers } from "@nats-io/nats-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   bridgeToken,
   fetchInstallProfile,
+  Identity,
   identityAccountCreateSubject,
   identityFromSubject,
   identityMembershipsSubject,
+  identityServiceAccountIssueSubject,
+  identityServiceAccountRevokeSubject,
+  identityServiceAccountRotateSubject,
   principalFromCreds,
   whoami,
 } from "../src/index.js";
@@ -30,6 +35,18 @@ describe("the bridge's wire", () => {
     expect(identityFromSubject("CHRON.CTRL.IDENTITY.MEMBERSHIPS.x.erin")).toBeUndefined();
     expect(identityFromSubject("CHRON.CTRL.IDENTITY.MEMBERSHIPS.0.erin")).toBeUndefined();
     expect(identityFromSubject("CHRON.CTRL.IDENTITY.MEMBERSHIPS.4242.Erin")).toBeUndefined();
+  });
+
+  it("the service-account verbs carry the admin's identity in the subject (decision 0052)", () => {
+    const issue = identityServiceAccountIssueSubject(4242, "erin");
+    expect(issue).toBe("CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.ISSUE.4242.erin");
+    expect(identityServiceAccountRotateSubject(4242, "erin")).toBe(
+      "CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.ROTATE.4242.erin",
+    );
+    expect(identityServiceAccountRevokeSubject(4242, "erin")).toBe(
+      "CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.REVOKE.4242.erin",
+    );
+    expect(identityFromSubject(issue)).toEqual({ githubId: 4242, login: "erin" });
   });
 });
 
@@ -107,5 +124,96 @@ describe("whoami", () => {
     // The quick start's user is an nkey with no name: whoami must not
     // mistake the key for a principal.
     await expect(whoami(u.client.connection)).rejects.toThrow(/no principal name/);
+  });
+});
+
+describe("the service-account verbs' wire (decision 0052)", () => {
+  // The responders are the managed service's; here a stand-in on a real
+  // server answers them, so what the test proves is the request each
+  // method sends and the reply it hands back untouched.
+  let u: Up;
+  beforeAll(async () => {
+    u = await up();
+  });
+  afterAll(async () => {
+    await u.stop();
+  });
+
+  it("issue, rotate and revoke carry the account and the name; issue the role too", async () => {
+    const nc = u.client.connection;
+    const seen: { subject: string; body: unknown }[] = [];
+    const sub = nc.subscribe("CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.>", {
+      callback: (_err, msg) => {
+        const body = JSON.parse(new TextDecoder().decode(msg.data)) as { account: string; name: string };
+        seen.push({ subject: msg.subject, body });
+        const verb = msg.subject.split(".")[4];
+        const reply =
+          verb === "REVOKE"
+            ? { account: body.account, name: body.name, public_key: "UOLD" }
+            : {
+                account: body.account,
+                name: body.name,
+                role: "writer",
+                public_key: "UNEW",
+                creds: "-----BEGIN NATS USER JWT-----\n",
+              };
+        msg.respond(new TextEncoder().encode(JSON.stringify(reply)));
+      },
+    });
+    try {
+      const id = new Identity(nc, 4242, "erin");
+      const issued = await id.issueServiceAccount("acme", "billing-svc", "writer");
+      expect(issued).toEqual({
+        account: "acme",
+        name: "billing-svc",
+        role: "writer",
+        public_key: "UNEW",
+        creds: "-----BEGIN NATS USER JWT-----\n",
+      });
+      const rotated = await id.rotateServiceAccount("acme", "billing-svc");
+      expect(rotated.public_key).toBe("UNEW");
+      const revoked = await id.revokeServiceAccount("acme", "billing-svc");
+      expect(revoked).toEqual({ account: "acme", name: "billing-svc", public_key: "UOLD" });
+    } finally {
+      sub.unsubscribe();
+    }
+    expect(seen).toEqual([
+      {
+        subject: "CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.ISSUE.4242.erin",
+        body: { account: "acme", name: "billing-svc", role: "writer" },
+      },
+      {
+        subject: "CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.ROTATE.4242.erin",
+        body: { account: "acme", name: "billing-svc" },
+      },
+      {
+        subject: "CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.REVOKE.4242.erin",
+        body: { account: "acme", name: "billing-svc" },
+      },
+    ]);
+  });
+
+  it("a refusal is the service's own, by code", async () => {
+    const nc = u.client.connection;
+    const sub = nc.subscribe("CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.ISSUE.4242.erin", {
+      callback: (_err, msg) => {
+        msg.respond(new Uint8Array(), {
+          headers: (() => {
+            const h = headers();
+            h.set("Nats-Service-Error-Code", "credential-exists");
+            h.set("Nats-Service-Error", "service account billing-svc already has a credential; rotate it");
+            return h;
+          })(),
+        });
+      },
+    });
+    try {
+      const id = new Identity(nc, 4242, "erin");
+      await expect(id.issueServiceAccount("acme", "billing-svc", "writer")).rejects.toMatchObject({
+        code: "credential-exists",
+      });
+    } finally {
+      sub.unsubscribe();
+    }
   });
 });
