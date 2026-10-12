@@ -7,6 +7,7 @@ import { headers } from "@nats-io/nats-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   bridgeToken,
+  fetchInstallManifest,
   fetchInstallProfile,
   Identity,
   identityAccountCreateSubject,
@@ -82,12 +83,52 @@ describe("fetchInstallProfile", () => {
             websocket_url: "wss://connect.example",
             github_client_id: "Iv1.x",
             sentinel: "-----BEGIN NATS USER JWT-----",
+            solutions: [{ name: "chronicle-agents", manifest: "https://agents.example/install.json" }],
           }),
         );
         return;
       }
       if (req.url === "/partial.json") {
         res.end(JSON.stringify({ url: "tls://x" }));
+        return;
+      }
+      if (req.url === "/install.json") {
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            manifest: 1,
+            solution: {
+              name: "chronicle-agents",
+              description: "rooms",
+              version: "0.1.1",
+              home: "https://github.com/impire-io/chronicle-agents",
+              url: "https://agents.example",
+            },
+            stores: [
+              {
+                name: "rooms",
+                description: "the rooms",
+                types: [{ name: "message", definition: { schema: { type: "object" }, history: "full" } }],
+              },
+            ],
+            announce: { store: "rooms", path: "solution/chronicle-agents" },
+          }),
+        );
+        return;
+      }
+      if (req.url === "/install-old.json") {
+        res.end(
+          JSON.stringify({
+            manifest: 0,
+            solution: { name: "x" },
+            stores: [],
+            announce: { store: "s", path: "p" },
+          }),
+        );
+        return;
+      }
+      if (req.url === "/install-partial.json") {
+        res.end(JSON.stringify({ manifest: 1, solution: { name: "x" } }));
         return;
       }
       res.statusCode = 404;
@@ -105,9 +146,28 @@ describe("fetchInstallProfile", () => {
     expect(p.websocket_url).toBe("wss://connect.example");
     expect(p.github_client_id).toBe("Iv1.x");
   });
+  it("passes the hosted solutions through, manifest address included", async () => {
+    const p = await fetchInstallProfile(`${base}/.well-known/chronicle/profile.json`);
+    expect(p.solutions).toEqual([
+      { name: "chronicle-agents", manifest: "https://agents.example/install.json" },
+    ]);
+  });
   it("refuses a missing or partial profile", async () => {
     await expect(fetchInstallProfile(`${base}/nope.json`)).rejects.toThrow(/404/);
     await expect(fetchInstallProfile(`${base}/partial.json`)).rejects.toThrow(/missing/);
+  });
+
+  it("reads an install manifest of the shape it knows", async () => {
+    const m = await fetchInstallManifest(`${base}/install.json`);
+    expect(m.manifest).toBe(1);
+    expect(m.solution.name).toBe("chronicle-agents");
+    expect(m.stores[0]?.types[0]?.definition.history).toBe("full");
+    expect(m.announce).toEqual({ store: "rooms", path: "solution/chronicle-agents" });
+  });
+  it("refuses a manifest of another shape, a partial one, or none", async () => {
+    await expect(fetchInstallManifest(`${base}/install-old.json`)).rejects.toThrow(/shape 0 is not 1/);
+    await expect(fetchInstallManifest(`${base}/install-partial.json`)).rejects.toThrow(/missing/);
+    await expect(fetchInstallManifest(`${base}/nope.json`)).rejects.toThrow(/404/);
   });
 });
 

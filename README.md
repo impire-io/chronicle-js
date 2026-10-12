@@ -27,7 +27,7 @@ from the suite's last result, never edited by hand:
 
 | SDK                          | Contract | Suite (chronicle release) | Fixtures     | Scenarios   | Supports |
 | ---------------------------- | -------- | ------------------------- | ------------ | ----------- | -------- |
-| `@impire-io/chronicle` 0.3.0 | 2.0.0    | v0.4.0                    | ✅ 83 passed | ✅ 2 passed | yes      |
+| `@impire-io/chronicle` 0.3.1 | 2.0.0    | v0.4.0                    | ✅ 83 passed | ✅ 2 passed | yes      |
 
 <!-- support-matrix:end -->
 
@@ -68,6 +68,8 @@ await id.close();
 
 const c = await connectBridge({ ...auth, account });
 ```
+
+The profile also lists the solutions the environment hosts (`profile.solutions`, each a name and the address of its install manifest); `fetchInstallManifest(address)` reads one — the stores, the types and the announcement that enabling the solution in an account means (chronicle-hq design 14 § the install manifest).
 
 An admin of an account issues a service account's credential on the same
 plane, and gets it back exactly once; `rotateServiceAccount` hands down a
