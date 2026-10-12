@@ -103,6 +103,8 @@ export interface InstallManifestSolution {
 export interface InstallManifestStore {
   name: string;
   description: string;
+  /** The store must allow schedules (decision 0050); absent means not. */
+  schedules?: boolean;
   types: InstallManifestType[];
 }
 
