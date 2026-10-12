@@ -13,8 +13,15 @@
 // design 02-DESIGN/08-browser-identity.md § the identity plane, at
 // chronicle-hq commit 5c1d258): the console speaks these from its Members
 // page on a placement opened for the one request and closed after.
+// The profile also lists the solutions the environment hosts, each with
+// the address of its install manifest, and the manifest's shape is here
+// too (chronicle-hq decision
+// 03-DECISIONS/0054-a-solution-is-enabled-from-the-console-by-its-install-manifest.md,
+// designs 02-DESIGN/08-browser-identity.md and 02-DESIGN/14-solutions.md
+// § the install manifest, at chronicle-hq commit 88fa386): the console
+// enables a solution for an account from what the manifest declares.
 import type { NatsConnection } from "@nats-io/nats-core";
-import { Client, dial } from "./client.js";
+import { Client, dial, type TypeDefinition } from "./client.js";
 import { request, type CallOptions } from "./rpc.js";
 
 /** Where the hosted environment publishes its install profile. */
@@ -36,6 +43,15 @@ export interface InstallProfile {
   github_oauth_base?: string;
   /** Where the web flow's code and refresh token are traded for tokens: control's exchange (decision 0041). */
   github_token_url?: string;
+  /** The solutions the environment hosts, each with its install manifest's address (decision 0054); absent when it hosts none. */
+  solutions?: InstallProfileSolution[];
+}
+
+/** A solution the environment hosts: its name and where its install manifest is. */
+export interface InstallProfileSolution {
+  name: string;
+  /** The address of the solution's install manifest. */
+  manifest: string;
 }
 
 /** Fetches an install's profile; integrity comes from the HTTPS name it is served at. */
@@ -49,6 +65,75 @@ export async function fetchInstallProfile(url: string = HOSTED_PROFILE_URL): Pro
     throw new Error(`install profile ${url}: missing url, sentinel or github_client_id`);
   }
   return p as InstallProfile;
+}
+
+/** The shape version of the install manifest this SDK reads. */
+export const INSTALL_MANIFEST_VERSION = 1;
+
+/**
+ * A solution's install manifest (chronicle-hq design 14 § the install
+ * manifest): what enabling the solution in an account means — the stores to
+ * create, the types to define in each, in order, and the announcement to
+ * write. Published by the solution at its own address; names and
+ * definitions only, never data and never a credential.
+ */
+export interface InstallManifest {
+  /** The shape's version: 1. */
+  manifest: number;
+  /** The announcement's fields: the solution as the console shows it. */
+  solution: InstallManifestSolution;
+  /** The stores to create, in order, each with its types in order. */
+  stores: InstallManifestStore[];
+  /** Where the announcement is created: the store and the path `solution/<name>`. */
+  announce: { store: string; path: string };
+}
+
+/** The solution's announcement, as the manifest states it. */
+export interface InstallManifestSolution {
+  name: string;
+  description: string;
+  version: string;
+  /** Its source of truth: a repository or documentation URL. */
+  home: string;
+  /** The hosted address of its interface. */
+  url: string;
+}
+
+/** One store the manifest creates, with the types it defines there in order. */
+export interface InstallManifestStore {
+  name: string;
+  description: string;
+  types: InstallManifestType[];
+}
+
+/** One type the manifest defines: its name and its definition in the SDK contract's shape. */
+export interface InstallManifestType {
+  name: string;
+  definition: TypeDefinition;
+}
+
+/**
+ * Fetches a solution's install manifest from its address, fresh, and refuses
+ * anything that is not a manifest of the shape this SDK reads.
+ */
+export async function fetchInstallManifest(
+  url: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<InstallManifest> {
+  const res = await fetch(url, { cache: "no-store", signal: opts.signal ?? null });
+  if (!res.ok) {
+    throw new Error(`install manifest ${url}: ${res.status} ${res.statusText}`);
+  }
+  const m = (await res.json()) as Partial<InstallManifest>;
+  if (m.manifest !== INSTALL_MANIFEST_VERSION) {
+    throw new Error(
+      `install manifest ${url}: shape ${String(m.manifest)} is not ${INSTALL_MANIFEST_VERSION}, the one this client reads`,
+    );
+  }
+  if (!m.solution?.name || !Array.isArray(m.stores) || !m.announce?.store || !m.announce.path) {
+    throw new Error(`install manifest ${url}: missing solution, stores or announce`);
+  }
+  return m as InstallManifest;
 }
 
 /** The identity plane's selector: a placement into it, not into an account. */
