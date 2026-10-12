@@ -194,6 +194,8 @@ export interface StoreOptions {
   history?: string;
   /** The store's byte budget; absent means the account's default. */
   maxBytes?: number;
+  /** The store allows schedules and per-message TTLs (decision 0050); absent means not. */
+  schedules?: boolean;
 }
 
 /** Where a tail starts. */
@@ -306,6 +308,7 @@ export class Client {
       ...(opts.description ? { description: opts.description } : {}),
       ...(opts.history ? { history: opts.history } : {}),
       ...(opts.maxBytes ? { max_bytes: opts.maxBytes } : {}),
+      ...(opts.schedules ? { schedules: true } : {}),
     });
   }
 
