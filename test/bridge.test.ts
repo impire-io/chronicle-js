@@ -19,7 +19,7 @@ import {
   principalFromCreds,
   whoami,
 } from "../src/index.js";
-import { up, type Up } from "./conformance/up.js";
+import { nodeConnection, up, type Up } from "./conformance/up.js";
 
 describe("the bridge's wire", () => {
   it("the CONNECT token is selector:token", () => {
@@ -189,6 +189,7 @@ describe("whoami", () => {
 
 describe("the service-account verbs' wire (decision 0052)", () => {
   // The responders are the managed service's; here a stand-in on a real
+  // server — the quick start's node user, which the baseline does not bind —
   // server answers them, so what the test proves is the request each
   // method sends and the reply it hands back untouched.
   let u: Up;
@@ -200,7 +201,7 @@ describe("the service-account verbs' wire (decision 0052)", () => {
   });
 
   it("issue, rotate and revoke carry the account and the name; issue the role too", async () => {
-    const nc = u.client.connection;
+    const nc = await nodeConnection(u);
     const seen: { subject: string; body: unknown }[] = [];
     const sub = nc.subscribe("CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.>", {
       callback: (_err, msg) => {
@@ -236,6 +237,7 @@ describe("the service-account verbs' wire (decision 0052)", () => {
       expect(revoked).toEqual({ account: "acme", name: "billing-svc", public_key: "UOLD" });
     } finally {
       sub.unsubscribe();
+      await nc.close();
     }
     expect(seen).toEqual([
       {
@@ -254,7 +256,7 @@ describe("the service-account verbs' wire (decision 0052)", () => {
   });
 
   it("a refusal is the service's own, by code", async () => {
-    const nc = u.client.connection;
+    const nc = await nodeConnection(u);
     const sub = nc.subscribe("CHRON.CTRL.IDENTITY.SERVICE_ACCOUNT.ISSUE.4242.erin", {
       callback: (_err, msg) => {
         msg.respond(new Uint8Array(), {
@@ -274,6 +276,7 @@ describe("the service-account verbs' wire (decision 0052)", () => {
       });
     } finally {
       sub.unsubscribe();
+      await nc.close();
     }
   });
 });

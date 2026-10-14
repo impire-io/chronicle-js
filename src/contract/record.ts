@@ -11,6 +11,10 @@ export const HDR = {
   parents: "Op-Parents",
   ts: "Op-Ts",
   version: "Op-Version",
+  /** The node's public key, on an operation it attested (decision 0057). */
+  attester: "Op-Attester",
+  /** The node's signature over the record's signed form, base64. */
+  signature: "Op-Signature",
   expectedLastSubjectSeq: "Nats-Expected-Last-Subject-Sequence",
   rollup: "Nats-Rollup",
   chunk: "Chron-Chunk",
@@ -40,16 +44,31 @@ export interface Op {
   ts: string;
   /** Op-Version: the envelope version. */
   version: string;
+  /** Op-Attester: the public key of the node that attested the author; empty on a direct write (decision 0057). */
+  attester: string;
+  /** Op-Signature: the node's signature over the signed form, base64; empty on a direct write. */
+  signature: string;
   /** The exact subject the op lives on; empty before it is written. */
   subject: string;
   /** The stream sequence — the only order; 0 before it is written. */
   seq: number;
   /** The payload, data only. */
   payload: Uint8Array;
+  /**
+   * The reader's finding, never a header: the signature verifies against
+   * an attester key the store's META lists. False for every operation
+   * written directly.
+   */
+  verified: boolean;
 }
 
-/** The fields an op's headers carry. */
+/** The fields an op's record headers carry. */
 export type OpHeaderFields = Pick<Op, "id" | "type" | "author" | "parents" | "ts" | "version">;
+
+/** Reads the attestation headers back; both empty on a direct write. */
+export function parseAttestation(values: (name: string) => string[]): Pick<Op, "attester" | "signature"> {
+  return { attester: values(HDR.attester)[0] ?? "", signature: values(HDR.signature)[0] ?? "" };
+}
 
 /**
  * The headers an op is published with, in order, one entry per value:
@@ -145,4 +164,8 @@ export interface StoreConfig {
   max_bytes?: number;
   /** The history policy: compactable (the default) or full. */
   history?: string;
+  /** The store allows schedules and per-message TTLs (decision 0050). */
+  schedules?: boolean;
+  /** The store requires verified authors (decision 0057): writes go through chronicle, and an operation written any other way is kept but takes no effect. */
+  verified_authors?: boolean;
 }

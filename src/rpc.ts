@@ -15,6 +15,9 @@ function serviceError(msg: Msg): ServiceError | undefined {
   return code === "" ? undefined : new ServiceError(code, msg.headers?.get(HDR.serviceError) ?? "");
 }
 
+/** The catalogued error a reply carries, if any — for a request made with its own headers. */
+export const serviceErrorOf = serviceError;
+
 /** Options for one request. */
 export interface CallOptions {
   /** How long to wait for the reply, in milliseconds. */

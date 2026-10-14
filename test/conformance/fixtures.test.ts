@@ -4,13 +4,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  attestationHeaders,
   foldStep,
   guardRetryLanded,
   isValidName,
   mergePatch,
   opHeaders,
+  parseAttestation,
   parseOpHeaders,
   resolveInstance,
+  signedForm,
+  verifyAttestation,
   type NameKind,
   type OpHeaderFields,
   type TypeRecord,
@@ -96,6 +100,45 @@ describe("headers.json", () => {
     expect(got).toEqual(headers);
     const back = parseOpHeaders((name) => headers[name] ?? []);
     expect(back).toEqual({ ...op, version: op.version === "" ? "1" : op.version });
+  });
+});
+
+describe("attestation.json", () => {
+  interface Case {
+    name: string;
+    subject: string;
+    op: OpHeaderFields;
+    payload: string;
+    attester: string;
+    signature: string;
+    signedForm: string;
+    valid: boolean;
+    headers: Record<string, string[]>;
+  }
+  const fx = suiteFile<{ attester: string; cases: Case[] }>("fixtures", "attestation.json");
+  it.each(fx.cases)("$name", async (c) => {
+    const op = {
+      ...c.op,
+      subject: c.subject,
+      payload: new TextEncoder().encode(c.payload),
+      attester: c.attester,
+      signature: c.signature,
+    };
+    if (c.valid) {
+      expect(await signedForm(op)).toBe(c.signedForm);
+    }
+    expect(await verifyAttestation(op)).toBe(c.valid);
+    expect(c.attester).toBe(fx.attester);
+    // The two headers ride the record exactly as the fixture shows.
+    const got: Record<string, string[]> = {};
+    for (const [k, v] of [...opHeaders(c.op), ...attestationHeaders(op)]) {
+      (got[k] ??= []).push(v);
+    }
+    expect(got).toEqual(c.headers);
+    expect(parseAttestation((name) => c.headers[name] ?? [])).toEqual({
+      attester: c.attester,
+      signature: c.signature,
+    });
   });
 });
 

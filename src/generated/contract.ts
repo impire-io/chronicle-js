@@ -2,13 +2,14 @@
 /* eslint-disable */
 
 /** The contract version this SDK implements (design 12 § the artifact). */
-export const CONTRACT_VERSION = "2.0.0";
+export const CONTRACT_VERSION = "3.0.0";
 
 /** The interaction shapes the contract describes. */
 export const SHAPES = [
   {
     name: "request-reply",
-    description: "one request, one reply; no responder is a typed error",
+    description:
+      "one request, one reply; no responder is a typed error. The control verbs, and the verified write",
   },
   {
     name: "streamed-reply",
@@ -27,7 +28,7 @@ export const SHAPES = [
   },
   {
     name: "publish",
-    description: "a guarded JetStream publish: every append",
+    description: "a guarded JetStream publish: every direct append",
   },
   {
     name: "subscribe",
@@ -41,7 +42,8 @@ export const HEADERS = {
   operation: {
     "Nats-Msg-Id": "the op ID and the dedup key, made once by the writer, kept across retries",
     "Op-Type": "the operation's kind in the log's vocabulary",
-    "Op-Author": "the principal ID, stamped from the credentials",
+    "Op-Author":
+      "the principal ID: stamped by the SDK from the credentials on a direct append; bound to the caller by the node on a verified write",
     "Op-Parents": "the op IDs the writer had seen, one header value per parent",
     "Op-Ts": "author-claimed clock, RFC 3339, informational only",
     "Op-Version": "the envelope version",
@@ -61,6 +63,13 @@ export const HEADERS = {
     "Nats-Service-Error-Code": "a code from the error catalog",
     "Nats-Service-Error": "the description",
   },
+  attestation: {
+    "Op-Attester":
+      "the public key of the node that attested the author (decision 0057); present only on an operation written through the node",
+    "Op-Signature": "the node's Ed25519 signature over the record's signed form, base64",
+    signedForm:
+      "subject, Nats-Msg-Id, Op-Type, Op-Author, Op-Parents joined with ',', Op-Ts as sent (empty when unset), Op-Version (defaulted), and the hex SHA-256 of the payload — one per line, joined with '\\n'",
+  },
 } as const;
 
 /** Name grammars, derivations, META keys and vocabularies. */
@@ -78,7 +87,7 @@ export const GRAMMARS = {
     storedSeparator: ".",
     note: "type/id, then name/id for each child, e.g. invoice/inv-1/comments/c-3; converted to and from the stored tail segment for segment",
   },
-  reservedStoreNames: ["api", "meta", "sys"],
+  reservedStoreNames: ["api", "live", "meta", "sys"],
   servicePrincipal: "chronicle",
   root: "CHRON",
   metaBucket: "META",
@@ -91,6 +100,9 @@ export const GRAMMARS = {
     storeSubjects: "CHRON.<store>.>",
     opsFilter: "CHRON.<store>.OPS.>",
     opsSubject: "CHRON.<store>.OPS.<tail>",
+    apiSubject: "CHRON.API.<principal>.<verb>",
+    applySubject: "CHRON.API.<principal>.APPLY.<store>.<tail>",
+    indexQuerySubject: "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
   },
   metaKeys: {
     storeConfig: "log.<store>.config",
@@ -99,12 +111,31 @@ export const GRAMMARS = {
     principal: "identity.principal.<id>",
     member: "identity.member.<id>",
     invite: "identity.invite.<digest>",
+    attester: "identity.attester.<pub>",
   },
   roles: ["admin", "writer", "reader"],
   effects: ["merge", "none"],
   history: ["compactable", "full"],
   indexKinds: ["state", "search", "graph", "semantic"],
   principalKinds: ["member", "service"],
+  apiRoot: "CHRON.API",
+  liveRoot: "CHRON.LIVE",
+  memberBaseline: {
+    publish: [
+      "CHRON.*.OPS.>",
+      "CHRON.LIVE.>",
+      "CHRON.API.<principal>.>",
+      "$SYS.REQ.USER.INFO",
+      "$JS.API.INFO",
+      "$JS.API.CONSUMER.>",
+      "$JS.API.STREAM.INFO.>",
+      "$JS.API.STREAM.NAMES",
+      "$JS.API.STREAM.MSG.GET.>",
+      "$JS.API.DIRECT.GET.>",
+    ],
+    subscribe: ["CHRON.*.OPS.>", "CHRON.LIVE.>", "_INBOX.>"],
+    note: "what every member holds (design 01, decision 0057); <principal> is the member's own name — the server's {{name()}} template where one scope serves every member",
+  },
 } as const;
 
 /** Settings every store's stream carries. */
@@ -134,9 +165,10 @@ export const FOLD = {
     "undeclared",
     "reset",
     "malformed-snapshot",
+    "unverified",
   ],
   rules:
-    "resolve the tail (the path as stored) first: an undeclared child (one its parent type does not declare) is marked and moves nothing; a snapshot resets state to its payload's, judged against the instance schema when typed; a declared merge applies RFC 7386 onto current state, empty included; none, an unknown type, an unknown effect, a bad record or an invalid payload moves nothing; an untyped subject moves only by snapshot",
+    "resolve the tail (the path as stored) first: an undeclared child (one its parent type does not declare) is marked and moves nothing; a snapshot resets state to its payload's, judged against the instance schema when typed; a declared merge applies RFC 7386 onto current state, empty included; none, an unknown type, an unknown effect, a bad record or an invalid payload moves nothing; an untyped subject moves only by snapshot; in a store that requires verified authors, an op whose attestation is absent or does not verify against an attester key in META is marked unverified and moves nothing (decision 0057)",
 } as const;
 
 /** The error catalog: every code a service returns, with its meaning. */
@@ -253,6 +285,30 @@ export const ERROR_CATALOG = [
     code: "provider-unavailable",
     meaning: "the semantic kind's embedding provider did not answer",
   },
+  {
+    code: "not-the-caller",
+    meaning: "the record names an author other than the caller the subject carries",
+  },
+  {
+    code: "undefined-operation",
+    meaning: "the type defines no such operation",
+  },
+  {
+    code: "undeclared-child",
+    meaning: "the created type is not among its parent type's children",
+  },
+  {
+    code: "schema-violation",
+    meaning: "the data fails the operation's schema, or the state fails the type's",
+  },
+  {
+    code: "instance-exists",
+    meaning: "the instance already exists",
+  },
+  {
+    code: "instance-moved",
+    meaning: "the instance moved past the expected sequence",
+  },
 ] as const;
 
 /** A code from the error catalog. */
@@ -284,7 +340,13 @@ export type ErrorCode =
   | "no-such-index"
   | "no-such-instance"
   | "reserved-state-index"
-  | "provider-unavailable";
+  | "provider-unavailable"
+  | "not-the-caller"
+  | "undefined-operation"
+  | "undeclared-child"
+  | "schema-violation"
+  | "instance-exists"
+  | "instance-moved";
 
 /** The fold step's decisions. */
 export type FoldDecision =
@@ -296,7 +358,8 @@ export type FoldDecision =
   | "invalid"
   | "undeclared"
   | "reset"
-  | "malformed-snapshot";
+  | "malformed-snapshot"
+  | "unverified";
 
 export interface TypeRecordRecord {
   revision: number;
@@ -389,6 +452,29 @@ export interface OpRecord {
    * any JSON
    */
   payload: unknown;
+  /**
+   * the reader's finding: Op-Signature verifies against an attester key META lists; false for every operation written directly
+   */
+  verified?: boolean;
+  [k: string]: unknown | undefined;
+}
+
+export interface StoreConfigRecord {
+  status: string;
+  description?: string;
+  max_bytes?: number;
+  history?: "compactable" | "full";
+  schedules?: boolean;
+  /**
+   * the store requires verified authors (decision 0057): an operation the node did not attest is kept in the history and marked out of the state; the SDKs write to it through the node
+   */
+  verified_authors?: boolean;
+  [k: string]: unknown | undefined;
+}
+
+export interface AttesterRecord {
+  public_key: string;
+  retired?: boolean;
   [k: string]: unknown | undefined;
 }
 
@@ -398,17 +484,21 @@ export interface PingReply {
 }
 
 export interface StoreCreateRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   store: string;
   description?: string;
   /**
    * per-log byte budget; zero means the default
    */
   max_bytes?: number;
+  /**
+   * the store's stream allows NATS message schedules and per-message TTLs: a schedule registered in it has its ticks written by the server (decision 0050)
+   */
+  schedules?: boolean;
   history?: "compactable" | "full";
+  /**
+   * the store requires verified authors (decision 0057)
+   */
+  verified_authors?: boolean;
 }
 
 export interface StoreCreateReply {
@@ -419,10 +509,6 @@ export interface StoreCreateReply {
 }
 
 export interface TypeDefineRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   store: string;
   type: string;
   /**
@@ -459,10 +545,6 @@ export interface TypeDefineReply {
 }
 
 export interface InstanceSnapshotRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   store: string;
   /**
    * a instance tail: subject-token-safe segments joined with '.'
@@ -483,10 +565,6 @@ export interface InstanceSnapshotReply {
 }
 
 export interface IndexDeclareRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   store: string;
   index: string;
   /**
@@ -507,10 +585,6 @@ export interface IndexDeclareReply {
 }
 
 export interface IndexDeleteRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   store: string;
   index: string;
 }
@@ -520,10 +594,6 @@ export interface IndexDeleteReply {
 }
 
 export interface MemberAddRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   member: string;
   role?: "admin" | "writer" | "reader";
   /**
@@ -546,10 +616,6 @@ export interface MemberAddReply {
 }
 
 export interface MemberRevokeRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   member: string;
 }
 
@@ -558,11 +624,14 @@ export interface MemberRevokeReply {
   public_key?: string;
 }
 
-export interface IndexQuerySearchRequest {
+export interface ApplyReply {
   /**
-   * the caller's principal ID — the same assertion as Op-Author
+   * the stream sequence the operation landed at
    */
-  principal: string;
+  seq: number;
+}
+
+export interface IndexQuerySearchRequest {
   /**
    * the match text; empty matches everything
    */
@@ -589,10 +658,6 @@ export interface IndexQuerySearchTrailer {
 }
 
 export interface IndexQueryGraphNeighborsRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   op?: "neighbors";
   /**
    * a instance tail: subject-token-safe segments joined with '.'
@@ -624,10 +689,6 @@ export interface IndexQueryGraphNeighborsTrailer {
 }
 
 export interface IndexQueryGraphWalkRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   op: "walk";
   /**
    * a instance tail: subject-token-safe segments joined with '.'
@@ -661,10 +722,6 @@ export interface IndexQueryGraphWalkTrailer {
 }
 
 export interface IndexQuerySemanticRequest {
-  /**
-   * the caller's principal ID — the same assertion as Op-Author
-   */
-  principal: string;
   text: string;
   /**
    * zero streams every match
@@ -715,6 +772,10 @@ export interface HistoryItem {
    * any JSON
    */
   payload: unknown;
+  /**
+   * the author is verified: Op-Signature verifies against an attester key META lists
+   */
+  verified?: boolean;
   [k: string]: unknown | undefined;
 }
 
@@ -744,6 +805,10 @@ export interface TailItem {
    * any JSON
    */
   payload: unknown;
+  /**
+   * the author is verified: Op-Signature verifies against an attester key META lists
+   */
+  verified?: boolean;
   [k: string]: unknown | undefined;
 }
 
@@ -816,18 +881,19 @@ export interface ListInstancesItem {
 
 /** Every interaction's subject; <store>, <index> and <tail> are filled at the call. */
 export const SUBJECTS = {
-  ping: "CHRON.API.PING",
-  "store.create": "CHRON.API.LOG.CREATE",
-  "type.define": "CHRON.API.TYPE.DEFINE",
-  "instance.snapshot": "CHRON.API.THING.ROLLUP",
-  "index.declare": "CHRON.API.INDEX.DECLARE",
-  "index.delete": "CHRON.API.INDEX.DELETE",
-  "member.add": "CHRON.API.MEMBER.ADD",
-  "member.revoke": "CHRON.API.MEMBER.REVOKE",
-  "index.query.search": "CHRON.API.INDEX.QUERY.<store>.<index>",
-  "index.query.graph.neighbors": "CHRON.API.INDEX.QUERY.<store>.<index>",
-  "index.query.graph.walk": "CHRON.API.INDEX.QUERY.<store>.<index>",
-  "index.query.semantic": "CHRON.API.INDEX.QUERY.<store>.<index>",
+  ping: "CHRON.API.<principal>.PING",
+  "store.create": "CHRON.API.<principal>.LOG.CREATE",
+  "type.define": "CHRON.API.<principal>.TYPE.DEFINE",
+  "instance.snapshot": "CHRON.API.<principal>.THING.ROLLUP",
+  "index.declare": "CHRON.API.<principal>.INDEX.DECLARE",
+  "index.delete": "CHRON.API.<principal>.INDEX.DELETE",
+  "member.add": "CHRON.API.<principal>.MEMBER.ADD",
+  "member.revoke": "CHRON.API.<principal>.MEMBER.REVOKE",
+  apply: "CHRON.API.<principal>.APPLY.<store>.<tail>",
+  "index.query.search": "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
+  "index.query.graph.neighbors": "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
+  "index.query.graph.walk": "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
+  "index.query.semantic": "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
   append: "CHRON.<store>.OPS.<tail>",
 } as const;
 
@@ -841,6 +907,7 @@ export const INTERACTION_SHAPES = {
   "index.delete": "request-reply",
   "member.add": "request-reply",
   "member.revoke": "request-reply",
+  apply: "request-reply",
   "index.query.search": "streamed-reply",
   "index.query.graph.neighbors": "streamed-reply",
   "index.query.graph.walk": "streamed-reply",

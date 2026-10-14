@@ -6,12 +6,23 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
+import { headers as natsHeaders, nuid, RequestError } from "@nats-io/nats-core";
+import { jetstream } from "@nats-io/jetstream";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import {
+  applySubject,
+  HDR,
   InstanceExistsError,
   InstanceMovedError,
   NoResponderError,
+  NotFoundError,
+  opHeaders,
+  opsSubject,
+  pathTail,
+  request,
+  rfc3339,
   ServiceError,
+  SUBJECTS,
   UndefinedOperationError,
   type Client,
   type TypeDefinition,
@@ -20,10 +31,14 @@ import { releaseDir, suiteFile } from "./suite.js";
 import { up, type Up } from "./up.js";
 
 const SETTLE_MS = 15_000;
+const encoder = new TextEncoder();
 
 interface Expect {
   state?: Record<string, unknown>;
   types?: string[];
+  /** Every operation read is (or is not) verified; verifiedEach says it per operation, in order. */
+  verified?: boolean;
+  verifiedEach?: boolean[];
   items?: string[];
   instances?: string[];
   total?: number;
@@ -53,6 +68,14 @@ interface Step {
   expectSeq?: number;
   limit?: number;
   live?: boolean;
+  /** A tail or history that includes the instance's children (decision 0049). */
+  children?: boolean;
+  /** A store that allows schedules (decision 0050). */
+  schedules?: boolean;
+  /** A store that requires verified authors; a verified author asked for on one write; the principal a raw step speaks or signs as (decision 0057). */
+  verifiedAuthors?: boolean;
+  verified?: boolean;
+  as?: string;
   after?: number;
   then?: Step;
   expect?: Expect;
@@ -94,6 +117,17 @@ function matchesError(err: unknown, want: string): boolean {
       return err instanceof UndefinedOperationError;
     case "no-responder":
       return err instanceof NoResponderError;
+    case "no-state":
+      return err instanceof NotFoundError;
+    case "refused":
+      // The server dropped a publish the member may not make: nobody
+      // answers and the request runs out of time, or the connection
+      // reports the violation.
+      return (
+        err instanceof RequestError ||
+        err instanceof NoResponderError ||
+        (err instanceof Error && /permissions violation|timeout/i.test(err.message))
+      );
     case "preflight":
       return (
         !(err instanceof ServiceError) &&
@@ -170,8 +204,69 @@ class Runner {
     const e = s.expect ?? {};
     switch (s.do) {
       case "store.create":
-        await c.createStore(store);
+        await c.createStore(store, {
+          ...(s.schedules ? { schedules: true } : {}),
+          ...(s.verifiedAuthors ? { verifiedAuthors: true } : {}),
+        });
         return;
+      case "verb.as":
+        // A verb spoken under another member's name: the subject is not
+        // this member's to publish on, so the server refuses it (0057).
+        await request(
+          c.connection,
+          SUBJECTS["store.create"].replace("<principal>", str(s.as)),
+          { store },
+          { timeout: 3_000 },
+        );
+        return;
+      case "apply.direct": {
+        // A bare publish on the instance's subject — the direct route, as
+        // any NATS client could always make it: asserted authorship.
+        const h = natsHeaders();
+        for (const [k, v] of opHeaders({
+          id: nuid.next(),
+          type: str(s.op),
+          author: c.author,
+          parents: [],
+          ts: rfc3339(new Date()),
+          version: "",
+        })) {
+          h.append(k, v);
+        }
+        h.set(HDR.expectedLastSubjectSeq, "0");
+        await jetstream(c.connection).publish(
+          opsSubject(store, pathTail(instance)),
+          encoder.encode(JSON.stringify(s.payload ?? {})),
+          { headers: h },
+        );
+        return;
+      }
+      case "apply.as": {
+        // A verified write whose record names another author: the node
+        // reads the caller from the subject and refuses the record.
+        const h = natsHeaders();
+        for (const [k, v] of opHeaders({
+          id: nuid.next(),
+          type: str(s.op),
+          author: str(s.as),
+          parents: [],
+          ts: rfc3339(new Date()),
+          version: "",
+        })) {
+          h.append(k, v);
+        }
+        h.set(HDR.expectedLastSubjectSeq, "0");
+        const msg = await c.connection.request(
+          applySubject(c.author, store, pathTail(instance)),
+          encoder.encode(JSON.stringify(s.payload ?? {})),
+          { headers: h, timeout: 10_000 },
+        );
+        const code = msg.headers?.get(HDR.serviceErrorCode) ?? "";
+        if (code !== "") {
+          throw new ServiceError(code, msg.headers?.get(HDR.serviceError) ?? "");
+        }
+        return;
+      }
       case "type.define":
         await c.defineType(store, str(s.type), s.def ?? { schema: {} });
         return;
@@ -185,16 +280,13 @@ class Runner {
         await c.createFromSnapshot(store, instance, s.payload);
         return;
       case "instance.create":
-        await c.create(store, instance, s.op ?? "create", s.payload);
+        await c.create(store, instance, s.op ?? "create", s.payload, s.verified ? { verified: true } : {});
         return;
       case "apply":
-        await c.apply(
-          store,
-          instance,
-          str(s.op),
-          s.payload,
-          s.expectSeq === undefined ? {} : { expectedSeq: s.expectSeq },
-        );
+        await c.apply(store, instance, str(s.op), s.payload, {
+          ...(s.expectSeq === undefined ? {} : { expectedSeq: s.expectSeq }),
+          ...(s.verified ? { verified: true } : {}),
+        });
         return;
       case "apply.guarded": {
         const sv = await c.state(store, instance);
@@ -214,10 +306,19 @@ class Runner {
       case "history":
         await this.until(label, s, async () => {
           const types: string[] = [];
-          for await (const op of c.history(store, instance)) {
+          const verified: boolean[] = [];
+          for await (const op of s.children ? c.historyUnder(store, instance) : c.history(store, instance)) {
             types.push(op.type);
+            verified.push(op.verified);
           }
-          return isDeepStrictEqual(types, e.types) ? "" : `history types ${types.join(",")}`;
+          if (!isDeepStrictEqual(types, e.types)) return `history types ${types.join(",")}`;
+          if (e.verified !== undefined && verified.some((v) => v !== e.verified)) {
+            return `history verified ${verified.join(",")}, want all ${String(e.verified)}`;
+          }
+          if (e.verifiedEach !== undefined && !isDeepStrictEqual(verified, e.verifiedEach)) {
+            return `history verified ${verified.join(",")}, want ${e.verifiedEach.join(",")}`;
+          }
+          return "";
         });
         return;
       case "query":
@@ -279,6 +380,7 @@ class Runner {
               signal,
               ...(s.live ? { live: true } : {}),
               ...(s.after !== undefined ? { after: s.after } : {}),
+              ...(s.children ? { children: true } : {}),
             }),
             (op) => op.type,
           ),
