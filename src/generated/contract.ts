@@ -126,6 +126,7 @@ export const GRAMMARS = {
       "CHRON.LIVE.>",
       "CHRON.API.<principal>.>",
       "$SYS.REQ.USER.INFO",
+      "$JS.API.INFO",
       "$JS.API.CONSUMER.>",
       "$JS.API.STREAM.INFO.>",
       "$JS.API.STREAM.NAMES",
