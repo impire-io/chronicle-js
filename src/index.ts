@@ -3,6 +3,7 @@ export * from "./errors.js";
 export * from "./generated/contract.js";
 export * from "./contract/names.js";
 export * from "./contract/record.js";
+export { attestationHeaders, signedForm, verifyAttestation, type Attestable } from "./contract/attest.js";
 export { mergePatch } from "./contract/merge.js";
 export {
   foldStep,

@@ -4,13 +4,17 @@
 // paths, children, snapshots. Control verbs are request/reply; queries are
 // streamed replies; writes are guarded JetStream publishes; reads of data
 // at rest are JetStream — ordered consumers, KV scans and watches — never
-// a node verb. Paths are converted to their stored tails here, once, at the
-// edge; subjects and keys never see a slash.
+// a node verb. Every verb is spoken on the caller's own subject,
+// CHRON.API.<principal>.<VERB…>, and no request names a principal; a write
+// may go through the node instead of straight to the stream, which then
+// vouches for the author (decision 0057). Paths are converted to their
+// stored tails here, once, at the edge; subjects and keys never see a slash.
 import {
   credsAuthenticator,
   headers as natsHeaders,
   nkeyAuthenticator,
   nuid,
+  RequestError,
   tokenAuthenticator,
   wsconnect,
   type Authenticator,
@@ -32,14 +36,18 @@ import { Kvm, type KV } from "@nats-io/kv";
 import {
   InstanceExistsError,
   InstanceMovedError,
+  NoResponderError,
   NotFoundError,
   SchemaViolationError,
   StaleVersionError,
   UndeclaredChildError,
   UndefinedOperationError,
 } from "./errors.js";
+import { verifyAttestation } from "./contract/attest.js";
 import { guardRetryLanded, resolveInstance, type Resolution } from "./contract/fold.js";
 import {
+  applySubject,
+  metaAttester,
   metaIndex,
   metaMember,
   metaStoreConfig,
@@ -57,6 +65,7 @@ import {
 import {
   HDR,
   opHeaders,
+  parseAttestation,
   parseOpHeaders,
   rfc3339,
   ROLLUP_SUBJECT,
@@ -72,6 +81,7 @@ import { compileSchema } from "./contract/schema.js";
 import {
   GRAMMARS,
   SUBJECTS,
+  type ApplyReply,
   type IndexDeclareReply,
   type IndexDeleteReply,
   type IndexQueryGraphNeighborsItem,
@@ -95,7 +105,7 @@ import {
   type TypeDefineReply,
   type WatchDeclarationsItem,
 } from "./generated/contract.js";
-import { request, requestStream, type CallOptions, type Streamed } from "./rpc.js";
+import { request, requestStream, serviceErrorOf, type CallOptions, type Streamed } from "./rpc.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -175,6 +185,13 @@ export interface ApplyOptions {
   opId?: string;
   /** The sequence of the instance's last operation; the write is refused if anything landed since. */
   expectedSeq?: number;
+  /**
+   * Ask for a verified author (decision 0057): the write goes through
+   * chronicle, which vouches for who wrote it, instead of straight to the
+   * stream. A store that requires verified authors is written this way
+   * without asking.
+   */
+  verified?: boolean;
 }
 
 /** A type's definition (design 07 § types). */
@@ -196,14 +213,18 @@ export interface StoreOptions {
   maxBytes?: number;
   /** The store allows schedules and per-message TTLs (decision 0050); absent means not. */
   schedules?: boolean;
+  /** The store requires verified authors (decision 0057): every write goes through chronicle, and an operation written any other way is kept but takes no effect. */
+  verifiedAuthors?: boolean;
 }
 
-/** Where a tail starts. */
+/** Where a tail starts, and how wide it reads. */
 export interface TailOptions {
   /** Start after this sequence. */
   after?: number;
   /** Only what lands from now on. */
   live?: boolean;
+  /** Include the operations of the instance's children — what lives under its path — in one order (decision 0049). */
+  children?: boolean;
   /** Ends the tail. */
   signal?: AbortSignal;
 }
@@ -241,8 +262,8 @@ export interface MemberOptions {
   kind?: "member" | "service";
 }
 
-/** A graph query: neighbors or walk, without the fields the SDK fills. */
-export type GraphQuery<R> = Omit<R, "principal" | "op">;
+/** A graph query: neighbors or walk, without the field the SDK fills. */
+export type GraphQuery<R> = Omit<R, "op">;
 
 /** A declaration as a watch yields it. */
 export type Declaration = WatchDeclarationsItem;
@@ -255,6 +276,10 @@ export class Client {
   readonly #author: string;
   readonly #buckets = new Map<string, Promise<KV>>();
   readonly #inFlight = new Map<string, Promise<unknown>>();
+  /** Which stores require verified authors — set at creation, read once. */
+  readonly #verifiedStores = new Map<string, Promise<boolean>>();
+  /** The attester keys META lists, as they are met. */
+  readonly #attesters = new Set<string>();
   #jsm: Promise<JetStreamManager> | undefined;
 
   private constructor(nc: NatsConnection, author: string) {
@@ -278,9 +303,14 @@ export class Client {
     return new Client(nc, author);
   }
 
-  /** The principal every write and request names. */
+  /** The principal every write names and every verb is spoken as. */
   get author(): string {
     return this.#author;
+  }
+
+  /** A verb's subject as this client speaks it: the caller's own (decision 0057). */
+  #subject(name: keyof typeof SUBJECTS): string {
+    return SUBJECTS[name].replace("<principal>", this.#author);
   }
 
   /** The connection underneath. */
@@ -297,25 +327,24 @@ export class Client {
 
   /** Asks the node who it is. */
   ping(opts?: CallOptions): Promise<PingReply> {
-    return request(this.#nc, SUBJECTS.ping, {}, opts);
+    return request(this.#nc, this.#subject("ping"), {}, opts);
   }
 
   /** Creates a store. */
   createStore(store: string, opts: StoreOptions = {}): Promise<StoreCreateReply> {
-    return request(this.#nc, SUBJECTS["store.create"], {
-      principal: this.#author,
+    return request(this.#nc, this.#subject("store.create"), {
       store,
       ...(opts.description ? { description: opts.description } : {}),
       ...(opts.history ? { history: opts.history } : {}),
       ...(opts.maxBytes ? { max_bytes: opts.maxBytes } : {}),
       ...(opts.schedules ? { schedules: true } : {}),
+      ...(opts.verifiedAuthors ? { verified_authors: true } : {}),
     });
   }
 
   /** Defines, or redefines, a type in a store. */
   defineType(store: string, type: string, def: TypeDefinition): Promise<TypeDefineReply> {
-    return request(this.#nc, SUBJECTS["type.define"], {
-      principal: this.#author,
+    return request(this.#nc, this.#subject("type.define"), {
       store,
       type,
       schema: def.schema,
@@ -327,8 +356,7 @@ export class Client {
 
   /** Declares an index on a store. */
   declareIndex(store: string, index: string, kind: string, config?: unknown): Promise<IndexDeclareReply> {
-    return request(this.#nc, SUBJECTS["index.declare"], {
-      principal: this.#author,
+    return request(this.#nc, this.#subject("index.declare"), {
       store,
       index,
       kind,
@@ -338,7 +366,7 @@ export class Client {
 
   /** Deletes an index declaration. */
   deleteIndex(store: string, index: string): Promise<IndexDeleteReply> {
-    return request(this.#nc, SUBJECTS["index.delete"], { principal: this.#author, store, index });
+    return request(this.#nc, this.#subject("index.delete"), { store, index });
   }
 
   /**
@@ -348,8 +376,7 @@ export class Client {
    */
   snapshot(store: string, path: string): Promise<InstanceSnapshotReply> {
     pathTail(path);
-    return request(this.#nc, SUBJECTS["instance.snapshot"], {
-      principal: this.#author,
+    return request(this.#nc, this.#subject("instance.snapshot"), {
       store,
       instance: path,
     });
@@ -357,8 +384,7 @@ export class Client {
 
   /** Adds a member — a person — or, with `kind: "service"`, a service account. */
   addMember(member: string, role: string, opts: MemberOptions = {}): Promise<MemberAddReply> {
-    return request(this.#nc, SUBJECTS["member.add"], {
-      principal: this.#author,
+    return request(this.#nc, this.#subject("member.add"), {
       member,
       role,
       ...(opts.kind ? { kind: opts.kind } : {}),
@@ -378,7 +404,7 @@ export class Client {
 
   /** Removes a member, or revokes a service account: the registry entry goes. */
   revokeMember(member: string): Promise<MemberRevokeReply> {
-    return request(this.#nc, SUBJECTS["member.revoke"], { principal: this.#author, member });
+    return request(this.#nc, this.#subject("member.revoke"), { member });
   }
 
   // --- queries: streamed replies -----------------------------------------
@@ -392,8 +418,8 @@ export class Client {
   ): Streamed<IndexQuerySearchItem, IndexQuerySearchTrailer> {
     return requestStream(
       this.#nc,
-      querySubject(store, index),
-      { principal: this.#author, query, ...(opts.limit ? { limit: opts.limit } : {}) },
+      this.#querySubject(store, index),
+      { query, ...(opts.limit ? { limit: opts.limit } : {}) },
       opts,
     );
   }
@@ -405,12 +431,7 @@ export class Client {
     q: GraphQuery<IndexQueryGraphNeighborsRequest>,
     opts: { signal?: AbortSignal } = {},
   ): Streamed<IndexQueryGraphNeighborsItem, IndexQueryGraphNeighborsTrailer> {
-    return requestStream(
-      this.#nc,
-      querySubject(store, index),
-      { ...q, principal: this.#author, op: "neighbors" },
-      opts,
-    );
+    return requestStream(this.#nc, this.#querySubject(store, index), { ...q, op: "neighbors" }, opts);
   }
 
   /** The instances reachable from an instance in a graph index. */
@@ -420,12 +441,7 @@ export class Client {
     q: GraphQuery<IndexQueryGraphWalkRequest>,
     opts: { signal?: AbortSignal } = {},
   ): Streamed<IndexQueryGraphWalkItem, IndexQueryGraphWalkTrailer> {
-    return requestStream(
-      this.#nc,
-      querySubject(store, index),
-      { ...q, principal: this.#author, op: "walk" },
-      opts,
-    );
+    return requestStream(this.#nc, this.#querySubject(store, index), { ...q, op: "walk" }, opts);
   }
 
   /** Queries a semantic index by meaning. */
@@ -437,10 +453,15 @@ export class Client {
   ): Streamed<IndexQuerySemanticItem, IndexQuerySemanticTrailer> {
     return requestStream(
       this.#nc,
-      querySubject(store, index),
-      { principal: this.#author, text, ...(opts.limit ? { limit: opts.limit } : {}) },
+      this.#querySubject(store, index),
+      { text, ...(opts.limit ? { limit: opts.limit } : {}) },
       opts,
     );
+  }
+
+  /** An index's query subject as this client speaks it. */
+  #querySubject(store: string, index: string): string {
+    return this.#subject("index.query.search").replace("<store>", store).replace("<index>", index);
   }
 
   // --- writes: guarded publishes ------------------------------------------
@@ -562,9 +583,11 @@ export class Client {
   }
 
   /**
-   * One publish: the op's headers, the guard, one in flight per subject;
+   * One write: the op's headers, the guard, one in flight per subject;
    * after a guard refusal, the subject's last op says whether this op
-   * landed (dedup's echo) or the instance moved.
+   * landed (dedup's echo) or the instance moved. A store that requires
+   * verified authors, or a caller that asks for one, sends the same record
+   * to the node instead (decision 0057).
    */
   async #publish(
     store: string,
@@ -594,6 +617,9 @@ export class Client {
     if (guard.guard !== undefined) {
       h.set(HDR.expectedLastSubjectSeq, String(guard.guard));
     }
+    if (opts.verified || (await this.#requiresVerified(store))) {
+      return this.#applyThroughNode(store, tail, opId, h, payload, refused);
+    }
     return this.#serial(subject, async () => {
       try {
         const ack = await this.#js.publish(subject, payload, { headers: h });
@@ -609,6 +635,91 @@ export class Client {
         throw err;
       }
     });
+  }
+
+  /**
+   * The verified write: the record, headers and payload as built, sent to
+   * the node on this caller's own APPLY subject. The node binds the author
+   * to this connection's name, signs the operation, publishes it with this
+   * id and guard, and answers the sequence — or a catalogued refusal, read
+   * here as the direct route's errors.
+   */
+  async #applyThroughNode(
+    store: string,
+    tail: string,
+    opId: string,
+    headers: MsgHdrs,
+    payload: Uint8Array,
+    refused: (what: string) => Error,
+  ): Promise<Ack> {
+    const subject = applySubject(this.#author, store, tail);
+    let msg;
+    try {
+      msg = await this.#nc.request(subject, payload, { headers, timeout: 10_000 });
+    } catch (err) {
+      if (err instanceof RequestError && err.isNoResponders()) {
+        throw new NoResponderError(subject);
+      }
+      throw err;
+    }
+    const error = serviceErrorOf(msg);
+    if (error) {
+      const what = `${tailPath(tail)} in store ${store}`;
+      switch (error.code) {
+        case "undefined-operation":
+          throw new UndefinedOperationError(error.description);
+        case "undeclared-child":
+          throw new UndeclaredChildError(error.description);
+        case "schema-violation":
+          throw new SchemaViolationError(error.description);
+        case "instance-exists":
+          throw new InstanceExistsError(what);
+        case "instance-moved":
+          throw refused(what);
+      }
+      throw error;
+    }
+    const reply = JSON.parse(decoder.decode(msg.data)) as ApplyReply;
+    return { opId, seq: reply.seq };
+  }
+
+  /** Whether the store requires verified authors — its declaration, set at creation, read once. */
+  #requiresVerified(store: string): Promise<boolean> {
+    let known = this.#verifiedStores.get(store);
+    if (known === undefined) {
+      known = this.getStore(store).then(
+        (cfg) => cfg.verified_authors === true,
+        // A store that does not exist requires nothing; the write then
+        // fails where it would have anyway.
+        (err: unknown) => {
+          if (err instanceof NotFoundError) return false;
+          throw err;
+        },
+      );
+      known.catch(() => this.#verifiedStores.delete(store));
+      this.#verifiedStores.set(store, known);
+    }
+    return known;
+  }
+
+  /**
+   * Sets op.verified: the attestation present, its key one META lists —
+   * read once per key — and the signature valid over the record.
+   */
+  async #verify(op: Op): Promise<Op> {
+    op.verified = false;
+    if (op.attester === "" || op.signature === "") {
+      return op;
+    }
+    if (!this.#attesters.has(op.attester)) {
+      const entry = await (await this.#bucket(GRAMMARS.metaBucket)).get(metaAttester(op.attester));
+      if (!entry || entry.operation !== "PUT") {
+        return op;
+      }
+      this.#attesters.add(op.attester);
+    }
+    op.verified = await verifyAttestation(op);
+    return op;
   }
 
   /** Runs fn after the subject's previous publish settles: one in flight per subject. */
@@ -889,31 +1000,48 @@ export class Client {
   /** An instance's history, from its first operation to the head observed at the start. */
   history(store: string, path: string): AsyncGenerator<Op> {
     validateStoreName(store);
-    return this.#ops(store, opsSubject(store, pathTail(path)), { bounded: true });
+    return this.#ops(store, [opsSubject(store, pathTail(path))], { bounded: true });
+  }
+
+  /**
+   * An instance's history and its children's, in one order, to the head
+   * observed at the start (decision 0049): a parent with what lives under it.
+   */
+  historyUnder(store: string, path: string): AsyncGenerator<Op> {
+    validateStoreName(store);
+    const subject = opsSubject(store, pathTail(path));
+    return this.#ops(store, [subject, `${subject}.>`], { bounded: true });
   }
 
   /** An instance's operations after a sequence, to the head observed at the start. */
   foldTail(store: string, path: string, after: number): AsyncGenerator<Op> {
     validateStoreName(store);
-    return this.#ops(store, opsSubject(store, pathTail(path)), { bounded: true, after });
+    return this.#ops(store, [opsSubject(store, pathTail(path))], { bounded: true, after });
   }
 
-  /** The live tail of a store, or of one instance when path is not empty; never ends on its own. */
+  /**
+   * The live tail of a store, or of one instance when path is not empty —
+   * with its children when asked (decision 0049); never ends on its own.
+   */
   tail(store: string, path = "", opts: TailOptions = {}): AsyncGenerator<Op> {
     validateStoreName(store);
-    return this.#ops(store, path === "" ? opsFilter(store) : opsSubject(store, pathTail(path)), {
-      ...opts,
-      bounded: false,
-    });
+    let subjects: string[];
+    if (path === "") {
+      subjects = [opsFilter(store)];
+    } else {
+      const subject = opsSubject(store, pathTail(path));
+      subjects = opts.children ? [subject, `${subject}.>`] : [subject];
+    }
+    return this.#ops(store, subjects, { ...opts, bounded: false });
   }
 
   async *#ops(
     store: string,
-    subject: string,
+    subjects: string[],
     o: { bounded: boolean; after?: number; live?: boolean; signal?: AbortSignal },
   ): AsyncGenerator<Op> {
     const consumer = await this.#js.consumers.get(streamName(store), {
-      filter_subjects: [subject],
+      filter_subjects: subjects,
       ...(o.live
         ? { deliver_policy: DeliverPolicy.New }
         : o.after !== undefined && o.after > 0
@@ -921,10 +1049,8 @@ export class Client {
           : {}),
     });
     try {
-      if (o.bounded) {
-        yield* bounded(consumer);
-      } else {
-        yield* unbounded(consumer, o.signal);
+      for await (const op of o.bounded ? bounded(consumer) : unbounded(consumer, o.signal)) {
+        yield await this.#verify(op);
       }
     } finally {
       await consumer.delete().catch(() => undefined);
@@ -988,10 +1114,6 @@ export class Client {
   }
 }
 
-function querySubject(store: string, index: string): string {
-  return SUBJECTS["index.query.search"].replace("<store>", store).replace("<index>", index);
-}
-
 /** A payload as bytes: raw bytes pass as they are, anything else is JSON. */
 function toBytes(payload: unknown): Uint8Array {
   return payload instanceof Uint8Array ? payload : encoder.encode(JSON.stringify(payload ?? {}));
@@ -1035,14 +1157,17 @@ function guardRefused(err: unknown): boolean {
   return err instanceof JetStreamApiError && err.code === JetStreamApiCodes.StreamWrongLastSequence;
 }
 
-/** An op as JetStream delivered it. */
+/** An op as JetStream delivered it; verified is the client's to set. */
 function toOp(m: JsMsg): Op {
   const h: MsgHdrs | undefined = m.headers;
+  const values = (name: string): string[] => h?.values(name) ?? [];
   return {
-    ...parseOpHeaders((name) => h?.values(name) ?? []),
+    ...parseOpHeaders(values),
+    ...parseAttestation(values),
     subject: m.subject,
     seq: m.seq,
     payload: m.data,
+    verified: false,
   };
 }
 

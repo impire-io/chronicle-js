@@ -155,3 +155,11 @@ export const metaPrincipal = (id: string): string => `identity.principal.${id}`;
 export const metaMember = (id: string): string => `identity.member.${id}`;
 /** META key of an invite. */
 export const metaInvite = (digest: string): string => `identity.invite.${digest}`;
+/** META key of an attester key: the node's public key, which signs verified authors (decision 0057). */
+export const metaAttester = (pub: string): string => `identity.attester.${pub}`;
+
+/** A verb's subject as one caller speaks it: CHRON.API.<principal>.<verb> (decision 0057). */
+export const apiSubject = (principal: string, verb: string): string => `${root}.API.${principal}.${verb}`;
+/** The verified write's subject: the caller asks the node to write one operation on an instance. */
+export const applySubject = (principal: string, store: string, tail: string): string =>
+  apiSubject(principal, `APPLY.${store}.${tail}`);

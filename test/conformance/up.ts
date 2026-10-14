@@ -7,7 +7,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Client } from "../../src/index.js";
+import type { NatsConnection } from "@nats-io/nats-core";
+import { Client, dial } from "../../src/index.js";
 import { chronicleBinary } from "./suite.js";
 
 /** A running quick start and a client connected to it over the websocket. */
@@ -18,7 +19,20 @@ export interface Up {
   stop(): Promise<void>;
 }
 
-/** Boots `chronicle up` in a fresh data dir and connects as its user. */
+/**
+ * A connection as the quick start's node user — unrestricted, where the
+ * member is bound by the baseline (decision 0057): a test that stands in
+ * for a responder, or observes the verbs, connects this way.
+ */
+export function nodeConnection(u: Up): Promise<NatsConnection> {
+  return dial({
+    servers: u.websocketURL,
+    nkeySeed: readFileSync(join(u.dir, "node.nk"), "utf8").trim(),
+    name: "test-node-user",
+  });
+}
+
+/** Boots `chronicle up` in a fresh data dir and connects as its member. */
 export async function up(): Promise<Up> {
   const dir = mkdtempSync(join(tmpdir(), "chronicle-js-"));
   const child: ChildProcess = spawn(
