@@ -27,7 +27,7 @@ from the suite's last result, never edited by hand:
 
 | SDK                          | Contract | Suite (chronicle release) | Fixtures     | Scenarios   | Supports |
 | ---------------------------- | -------- | ------------------------- | ------------ | ----------- | -------- |
-| `@impire-io/chronicle` 0.4.0 | 3.0.0    | v0.7.0                    | ✅ 89 passed | ✅ 3 passed | yes      |
+| `@impire-io/chronicle` 0.4.1 | 3.1.0    | v0.9.0                    | ✅ 90 passed | ✅ 3 passed | yes      |
 
 <!-- support-matrix:end -->
 
@@ -128,7 +128,13 @@ an `UndefinedOperationError`, a child the parent type does not declare an
 `UndeclaredChildError`. A write whose expected sequence the instance moved
 past is an `InstanceMovedError`; a create of an instance that exists is an
 `InstanceExistsError`; a service's refusal is a `ServiceError` carrying a
-code from the contract's error catalog.
+code from the contract's error catalog. Where the environment resolves roles
+itself (chronicle's `--roles callout`, chronicle-hq decision 0061), `addMember`,
+`addServiceAccount` and `revokeMember` are refused with
+`membership-elsewhere` — membership is managed where the roles live — and
+a verb or query whose role check the environment's responder did not
+answer is refused with `role-source-unavailable`, never answered from the
+registry.
 
 ## Developing
 
