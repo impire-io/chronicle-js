@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /** The contract version this SDK implements (design 12 § the artifact). */
-export const CONTRACT_VERSION = "3.0.0";
+export const CONTRACT_VERSION = "3.1.0";
 
 /** The interaction shapes the contract describes. */
 export const SHAPES = [
@@ -87,7 +87,7 @@ export const GRAMMARS = {
     storedSeparator: ".",
     note: "type/id, then name/id for each child, e.g. invoice/inv-1/comments/c-3; converted to and from the stored tail segment for segment",
   },
-  reservedStoreNames: ["api", "live", "meta", "sys"],
+  reservedStoreNames: ["api", "live", "meta", "role", "sys"],
   servicePrincipal: "chronicle",
   root: "CHRON",
   metaBucket: "META",
@@ -309,6 +309,16 @@ export const ERROR_CATALOG = [
     code: "instance-moved",
     meaning: "the instance moved past the expected sequence",
   },
+  {
+    code: "role-source-unavailable",
+    meaning:
+      "the environment's role responder did not answer, or answered outside the vocabulary; the request is refused, never answered from the registry",
+  },
+  {
+    code: "membership-elsewhere",
+    meaning:
+      "membership is managed where the roles live: the roles come from the environment's responder, and the member verbs have nothing to record",
+  },
 ] as const;
 
 /** A code from the error catalog. */
@@ -346,7 +356,9 @@ export type ErrorCode =
   | "undeclared-child"
   | "schema-violation"
   | "instance-exists"
-  | "instance-moved";
+  | "instance-moved"
+  | "role-source-unavailable"
+  | "membership-elsewhere";
 
 /** The fold step's decisions. */
 export type FoldDecision =
