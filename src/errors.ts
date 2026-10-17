@@ -52,6 +52,9 @@ export class UndeclaredChildError extends PreflightError {}
 /** The instance's type defines no such operation. */
 export class UndefinedOperationError extends PreflightError {}
 
+/** The path resolves to no type, so a create has no operation to apply: a type never defined, or one deleted (decision 0062). */
+export class NoTypeError extends PreflightError {}
+
 /** The operation's precondition is not met by the instance's current state (decision 0059). */
 export class PreconditionFailedError extends PreflightError {}
 

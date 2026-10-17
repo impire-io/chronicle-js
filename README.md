@@ -27,7 +27,7 @@ from the suite's last result, never edited by hand:
 
 | SDK                          | Contract | Suite (chronicle release) | Fixtures     | Scenarios   | Supports |
 | ---------------------------- | -------- | ------------------------- | ------------ | ----------- | -------- |
-| `@impire-io/chronicle` 0.4.2 | 3.2.0    | v0.10.0                   | ✅ 95 passed | ✅ 4 passed | yes      |
+| `@impire-io/chronicle` 0.5.0 | 3.3.0    | v0.11.0                   | ✅ 95 passed | ✅ 5 passed | yes      |
 
 <!-- support-matrix:end -->
 
@@ -120,17 +120,22 @@ console.log(hits.trailer?.total);
 
 await c.addMember("jordan", "reader", { githubId: 4242 });
 await c.addServiceAccount("billing-svc", "writer");
+await c.setRole("jordan", "admin"); // in place, from jordan's next request on; the only admin keeps the role
+
+await c.deleteType("orders", "invoice"); // its instances keep their history, untyped until the type is defined again
+await c.deleteStore("orders"); // total: history, state and indexes go, whatever the history policy; the name is free again
 ```
 
 Writes are checked before they are sent: data that fails its operation's
 schema is a `SchemaViolationError`, an operation the type does not define
 an `UndefinedOperationError`, a child the parent type does not declare an
-`UndeclaredChildError`. A write whose expected sequence the instance moved
+`UndeclaredChildError`, a create whose path resolves to no type a
+`NoTypeError` (`createFromSnapshot` is the untyped form). A write whose expected sequence the instance moved
 past is an `InstanceMovedError`; a create of an instance that exists is an
 `InstanceExistsError`; a service's refusal is a `ServiceError` carrying a
 code from the contract's error catalog. Where the environment resolves roles
 itself (chronicle's `--roles callout`, chronicle-hq decision 0061), `addMember`,
-`addServiceAccount` and `revokeMember` are refused with
+`addServiceAccount`, `setRole` and `revokeMember` are refused with
 `membership-elsewhere` — membership is managed where the roles live — and
 a verb or query whose role check the environment's responder did not
 answer is refused with `role-source-unavailable`, never answered from the

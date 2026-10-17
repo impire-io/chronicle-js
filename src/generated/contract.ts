@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /** The contract version this SDK implements (design 12 § the artifact). */
-export const CONTRACT_VERSION = "3.2.0";
+export const CONTRACT_VERSION = "3.3.0";
 
 /** The interaction shapes the contract describes. */
 export const SHAPES = [
@@ -329,6 +329,18 @@ export const ERROR_CATALOG = [
     code: "state-off-schema",
     meaning: "the state after the operation would fail the type's schema",
   },
+  {
+    code: "store-deleting",
+    meaning: "the store is being deleted: nothing can be done in it, and the name is free once it is gone",
+  },
+  {
+    code: "no-such-type",
+    meaning: "the store does not define the type",
+  },
+  {
+    code: "sole-admin",
+    meaning: "the account's only admin keeps the role: make another member admin first",
+  },
 ] as const;
 
 /** A code from the error catalog. */
@@ -370,7 +382,10 @@ export type ErrorCode =
   | "role-source-unavailable"
   | "membership-elsewhere"
   | "precondition-failed"
-  | "state-off-schema";
+  | "state-off-schema"
+  | "store-deleting"
+  | "no-such-type"
+  | "sole-admin";
 
 /** The fold step's decisions. */
 export type FoldDecision =
@@ -542,6 +557,14 @@ export interface StoreCreateReply {
   stream: string;
 }
 
+export interface StoreDeleteRequest {
+  store: string;
+}
+
+export interface StoreDeleteReply {
+  deleted: boolean;
+}
+
 export interface TypeDefineRequest {
   store: string;
   type: string;
@@ -584,6 +607,15 @@ export interface TypeDefineRequest {
 
 export interface TypeDefineReply {
   revision: number;
+}
+
+export interface TypeDeleteRequest {
+  store: string;
+  type: string;
+}
+
+export interface TypeDeleteReply {
+  deleted: boolean;
 }
 
 export interface InstanceSnapshotRequest {
@@ -664,6 +696,16 @@ export interface MemberRevokeRequest {
 export interface MemberRevokeReply {
   member: string;
   public_key?: string;
+}
+
+export interface MemberSetRoleRequest {
+  member: string;
+  role: "admin" | "writer" | "reader";
+}
+
+export interface MemberSetRoleReply {
+  member: string;
+  role: string;
 }
 
 export interface ApplyReply {
@@ -925,12 +967,15 @@ export interface ListInstancesItem {
 export const SUBJECTS = {
   ping: "CHRON.API.<principal>.PING",
   "store.create": "CHRON.API.<principal>.LOG.CREATE",
+  "store.delete": "CHRON.API.<principal>.LOG.DELETE",
   "type.define": "CHRON.API.<principal>.TYPE.DEFINE",
+  "type.delete": "CHRON.API.<principal>.TYPE.DELETE",
   "instance.snapshot": "CHRON.API.<principal>.THING.ROLLUP",
   "index.declare": "CHRON.API.<principal>.INDEX.DECLARE",
   "index.delete": "CHRON.API.<principal>.INDEX.DELETE",
   "member.add": "CHRON.API.<principal>.MEMBER.ADD",
   "member.revoke": "CHRON.API.<principal>.MEMBER.REVOKE",
+  "member.set-role": "CHRON.API.<principal>.MEMBER.SET_ROLE",
   apply: "CHRON.API.<principal>.APPLY.<store>.<tail>",
   "index.query.search": "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
   "index.query.graph.neighbors": "CHRON.API.<principal>.INDEX.QUERY.<store>.<index>",
@@ -943,12 +988,15 @@ export const SUBJECTS = {
 export const INTERACTION_SHAPES = {
   ping: "request-reply",
   "store.create": "request-reply",
+  "store.delete": "request-reply",
   "type.define": "request-reply",
+  "type.delete": "request-reply",
   "instance.snapshot": "request-reply",
   "index.declare": "request-reply",
   "index.delete": "request-reply",
   "member.add": "request-reply",
   "member.revoke": "request-reply",
+  "member.set-role": "request-reply",
   apply: "request-reply",
   "index.query.search": "streamed-reply",
   "index.query.graph.neighbors": "streamed-reply",
