@@ -37,6 +37,7 @@ import {
   InstanceExistsError,
   InstanceMovedError,
   NoResponderError,
+  NoTypeError,
   NotFoundError,
   PreconditionFailedError,
   SchemaViolationError,
@@ -109,9 +110,12 @@ import {
   type ListMembersItem,
   type MemberAddReply,
   type MemberRevokeReply,
+  type MemberSetRoleReply,
   type PingReply,
   type StoreCreateReply,
+  type StoreDeleteReply,
   type TypeDefineReply,
+  type TypeDeleteReply,
   type WatchDeclarationsItem,
 } from "./generated/contract.js";
 import { request, requestStream, serviceErrorOf, type CallOptions, type Streamed } from "./rpc.js";
@@ -379,6 +383,25 @@ export class Client {
   }
 
   /**
+   * Deletes a store (decision 0062): total and irreversible — its history,
+   * state and indexes go, whatever the history policy — in a fixed order a
+   * second call finishes from any step of. The name may be created again
+   * once it is gone.
+   */
+  deleteStore(store: string): Promise<StoreDeleteReply> {
+    return request(this.#nc, this.#subject("store.delete"), { store });
+  }
+
+  /**
+   * Deletes a type (decision 0062): its instances keep their history and
+   * are untyped — no state, absent from the listings — until the type is
+   * defined again, which restores them.
+   */
+  deleteType(store: string, type: string): Promise<TypeDeleteReply> {
+    return request(this.#nc, this.#subject("type.delete"), { store, type });
+  }
+
+  /**
    * Asks chronicle to take a snapshot of the instance: write its current
    * state as one entry and compact the history before it. Declining is an
    * answer (`taken: false`, with the reason), not an error.
@@ -411,9 +434,18 @@ export class Client {
     return this.addMember(name, role, { ...opts, kind: "service" });
   }
 
-  /** Removes a member, or revokes a service account: the registry entry goes. */
+  /** Removes a member, or revokes a service account: the registry entry goes. The account's only admin cannot be removed. */
   revokeMember(member: string): Promise<MemberRevokeReply> {
     return request(this.#nc, this.#subject("member.revoke"), { member });
+  }
+
+  /**
+   * Changes a member's or a service account's role in place (decision 0062):
+   * effective from the principal's next request, the credential untouched.
+   * The account's only admin cannot be demoted.
+   */
+  setRole(member: string, role: string): Promise<MemberSetRoleReply> {
+    return request(this.#nc, this.#subject("member.set-role"), { member, role });
   }
 
   // --- queries: streamed replies -----------------------------------------
@@ -528,6 +560,15 @@ export class Client {
       throw new Error("expectedSeq: a create expects no history by definition");
     }
     const bytesOf = toBytes(data);
+    // A create applies one of the type's operations: a path that resolves
+    // to no type has none to apply — a type never defined, or one deleted
+    // (decision 0062). The untyped form is createFromSnapshot.
+    const res = await this.#resolveTail(store, tail);
+    if (res.kind === "untyped") {
+      throw new NoTypeError(
+        `${path} resolves to no type in store ${store}: define the type, or create the instance from a snapshot`,
+      );
+    }
     await this.#preflightApply(store, tail, op, bytesOf);
     return this.#publish(store, tail, op, bytesOf, opts, { guard: 0 }, (t) => new InstanceExistsError(t));
   }

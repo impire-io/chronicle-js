@@ -42,6 +42,8 @@ interface Expect {
   verified?: boolean;
   verifiedEach?: boolean[];
   items?: string[];
+  /** The role expected per member in a list.members step (decision 0062). */
+  roles?: Record<string, string>;
   instances?: string[];
   total?: number;
   count?: number;
@@ -78,6 +80,9 @@ interface Step {
   verifiedAuthors?: boolean;
   verified?: boolean;
   as?: string;
+  /** The principal and role a member step names (decision 0062). */
+  member?: string;
+  role?: string;
   after?: number;
   then?: Step;
   expect?: Expect;
@@ -284,6 +289,21 @@ class Runner {
       case "index.delete":
         await c.deleteIndex(store, str(s.index));
         return;
+      case "store.delete":
+        await c.deleteStore(store);
+        return;
+      case "type.delete":
+        await c.deleteType(store, str(s.type));
+        return;
+      case "member.add":
+        await c.addMember(str(s.member), str(s.role));
+        return;
+      case "member.set-role":
+        await c.setRole(str(s.member), str(s.role));
+        return;
+      case "member.revoke":
+        await c.revokeMember(str(s.member));
+        return;
       case "instance.create.snapshot":
         await c.createFromSnapshot(store, instance, s.payload);
         return;
@@ -374,8 +394,18 @@ class Runner {
             // State is read as each instance's state, not listed as an index.
             for await (const i of c.listIndexes(store)) if (i.kind !== "state") items.push(i.name);
           }
-          if (s.do === "list.members") for await (const m of c.listMembers()) items.push(m.name);
-          return sameSet(items, e.items ?? []) ? "" : `items ${items.join(",")}`;
+          const roles: Record<string, string> = {};
+          if (s.do === "list.members") {
+            for await (const m of c.listMembers()) {
+              items.push(m.name);
+              roles[m.name] = m.role;
+            }
+          }
+          if (!sameSet(items, e.items ?? [])) return `items ${items.join(",")}`;
+          for (const [name, want] of Object.entries(e.roles ?? {})) {
+            if (roles[name] !== want) return `member ${name} has role ${roles[name] ?? "none"}, want ${want}`;
+          }
+          return "";
         });
         return;
       case "watch":

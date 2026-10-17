@@ -1,6 +1,6 @@
 {
   "name": "@impire-io/chronicle",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "The TypeScript SDK for chronicle: the SDK contract over nats.js, in the browser over a websocket and in Node.",
   "license": "Apache-2.0",
   "repository": {
@@ -27,8 +27,8 @@
     "node": ">=22"
   },
   "chronicle": {
-    "contract": "3.2.0",
-    "conformance": "0.10.0"
+    "contract": "3.3.0",
+    "conformance": "0.11.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
