@@ -1013,17 +1013,23 @@ export class Client {
     validateStoreName(store);
     const underTail = opts.under === undefined ? undefined : pathTail(opts.under);
     const underDepth = underTail === undefined ? 0 : underTail.split(TAIL_SEPARATOR).length;
-    // Under a parent, a type narrows by the parent's children map.
+    // Under a parent, the parent's children map names each child's type —
+    // what the listing shows — and, when a type is asked for, which child
+    // names carry it.
+    let childTypes: Record<string, string> = {};
     let childNames: Set<string> | undefined;
-    if (underTail !== undefined && opts.type !== undefined) {
+    if (underTail !== undefined) {
       const res = await this.#resolveTail(store, underTail);
-      childNames = new Set(
-        res.kind === "typed"
-          ? Object.entries(res.record.children ?? {})
-              .filter(([, t]) => t === opts.type)
-              .map(([name]) => name)
-          : [],
-      );
+      if (res.kind === "typed") {
+        childTypes = res.record.children ?? {};
+      }
+      if (opts.type !== undefined) {
+        childNames = new Set(
+          Object.entries(childTypes)
+            .filter(([, t]) => t === opts.type)
+            .map(([name]) => name),
+        );
+      }
     }
     const kv = await this.#bucket(stateBucket(store));
     const where = Object.entries(opts.where ?? {});
@@ -1051,9 +1057,7 @@ export class Client {
         continue;
       }
       const type =
-        underTail !== undefined
-          ? ((childNames !== undefined ? opts.type : undefined) ?? toks[toks.length - 2] ?? "")
-          : (toks[0] ?? "");
+        underTail !== undefined ? childTypeOf(childTypes, toks[toks.length - 2] ?? "") : (toks[0] ?? "");
       yield { path: tailPath(key), type, seq: sv.seq, state: sv.state };
     }
   }
@@ -1214,6 +1218,15 @@ function parseJSON(raw: Uint8Array): { ok: true; value: unknown } | { ok: false;
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * A child's type in a listing under a parent: the type the parent's
+ * children map declares for the child's name, else the name itself — the
+ * grammar's own answer when the parent is untyped or the name is undeclared.
+ */
+function childTypeOf(childTypes: Record<string, string>, name: string): string {
+  return childTypes[name] ?? name;
 }
 
 /** Every where clause holds on the state: the field exists and renders to the value's text. */
