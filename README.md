@@ -27,7 +27,7 @@ from the suite's last result, never edited by hand:
 
 | SDK                          | Contract | Suite (chronicle release) | Fixtures     | Scenarios   | Supports |
 | ---------------------------- | -------- | ------------------------- | ------------ | ----------- | -------- |
-| `@impire-io/chronicle` 0.5.0 | 3.3.0    | v0.11.0                   | ✅ 95 passed | ✅ 5 passed | yes      |
+| `@impire-io/chronicle` 0.5.1 | 3.3.0    | v0.11.0                   | ✅ 95 passed | ✅ 5 passed | yes      |
 
 <!-- support-matrix:end -->
 
