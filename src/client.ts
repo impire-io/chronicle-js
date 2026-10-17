@@ -38,13 +38,22 @@ import {
   InstanceMovedError,
   NoResponderError,
   NotFoundError,
+  PreconditionFailedError,
   SchemaViolationError,
+  StateOffSchemaError,
   StaleVersionError,
   UndeclaredChildError,
   UndefinedOperationError,
 } from "./errors.js";
 import { verifyAttestation } from "./contract/attest.js";
-import { guardRetryLanded, resolveInstance, type Resolution } from "./contract/fold.js";
+import {
+  guardRetryLanded,
+  judgePrecondition,
+  judgeSnapshot,
+  resolveInstance,
+  type Resolution,
+} from "./contract/fold.js";
+import { mergePatch } from "./contract/merge.js";
 import {
   applySubject,
   metaAttester,
@@ -672,6 +681,10 @@ export class Client {
           throw new UndeclaredChildError(error.description);
         case "schema-violation":
           throw new SchemaViolationError(error.description);
+        case "precondition-failed":
+          throw new PreconditionFailedError(error.description);
+        case "state-off-schema":
+          throw new StateOffSchemaError(error.description);
         case "instance-exists":
           throw new InstanceExistsError(what);
         case "instance-moved":
@@ -800,6 +813,38 @@ export class Client {
     if (failed !== "") {
       throw new SchemaViolationError(`the data does not fit ${opType}'s schema: ${failed}`);
     }
+    // The state's rules (decision 0059): where the operation declares a
+    // precondition, or the type a schema a merge must keep, the current
+    // state is read once and judged as chronicle will judge it.
+    const effect = def.effect === undefined || def.effect === "" ? "none" : def.effect;
+    const merges = effect === "merge" && res.record.schema !== undefined;
+    if (def.precondition === undefined && !merges) {
+      return;
+    }
+    const state = await this.#stateOfTail(store, tail);
+    const unmet = judgePrecondition(def, state);
+    if (unmet !== "") {
+      throw new PreconditionFailedError(
+        `${opType} on ${tailPath(tail)}: ${unmet.replace(/^the operation's precondition is not met: /, "")}`,
+      );
+    }
+    if (merges) {
+      const failedAfter = judgeSnapshot(res.record, mergePatch(state, parsed.value));
+      if (failedAfter !== "") {
+        throw new StateOffSchemaError(
+          `${opType} on ${tailPath(tail)}: after the operation, ${failedAfter.replace(/^state fails the type's schema: /, `the state fails ${res.typeName}'s schema: `)}`,
+        );
+      }
+    }
+  }
+
+  /** The instance's current derived state, or undefined when it has none yet. */
+  async #stateOfTail(store: string, tail: string): Promise<unknown> {
+    const entry = await (await this.#bucket(stateBucket(store))).get(tail);
+    if (!entry || entry.operation !== "PUT") {
+      return undefined;
+    }
+    return entry.json<StateValue>().state;
   }
 
   async #preflightSnapshot(store: string, tail: string, state: unknown): Promise<void> {

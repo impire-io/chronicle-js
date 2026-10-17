@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /** The contract version this SDK implements (design 12 § the artifact). */
-export const CONTRACT_VERSION = "3.1.0";
+export const CONTRACT_VERSION = "3.2.0";
 
 /** The interaction shapes the contract describes. */
 export const SHAPES = [
@@ -166,9 +166,11 @@ export const FOLD = {
     "reset",
     "malformed-snapshot",
     "unverified",
+    "precondition-unmet",
+    "off-schema",
   ],
   rules:
-    "resolve the tail (the path as stored) first: an undeclared child (one its parent type does not declare) is marked and moves nothing; a snapshot resets state to its payload's, judged against the instance schema when typed; a declared merge applies RFC 7386 onto current state, empty included; none, an unknown type, an unknown effect, a bad record or an invalid payload moves nothing; an untyped subject moves only by snapshot; in a store that requires verified authors, an op whose attestation is absent or does not verify against an attester key in META is marked unverified and moves nothing (decision 0057)",
+    "resolve the tail (the path as stored) first: an undeclared child (one its parent type does not declare) is marked and moves nothing; a snapshot resets state to its payload's, judged against the instance schema when typed; a declared merge applies RFC 7386 onto current state, empty included; none, an unknown type, an unknown effect, a bad record or an invalid payload moves nothing; an untyped subject moves only by snapshot; in a store that requires verified authors, an op whose attestation is absent or does not verify against an attester key in META is marked unverified and moves nothing (decision 0057); an op whose operation declares a precondition the current state does not satisfy — the empty object when the thing has none — is marked precondition-unmet and moves nothing, and a declared merge whose result fails the thing schema is marked off-schema and moves nothing: the schema is the shape every derived state keeps (decision 0059)",
 } as const;
 
 /** The error catalog: every code a service returns, with its meaning. */
@@ -319,6 +321,14 @@ export const ERROR_CATALOG = [
     meaning:
       "membership is managed where the roles live: the roles come from the environment's responder, and the member verbs have nothing to record",
   },
+  {
+    code: "precondition-failed",
+    meaning: "the operation's precondition is not met by the instance's current state",
+  },
+  {
+    code: "state-off-schema",
+    meaning: "the state after the operation would fail the type's schema",
+  },
 ] as const;
 
 /** A code from the error catalog. */
@@ -358,7 +368,9 @@ export type ErrorCode =
   | "instance-exists"
   | "instance-moved"
   | "role-source-unavailable"
-  | "membership-elsewhere";
+  | "membership-elsewhere"
+  | "precondition-failed"
+  | "state-off-schema";
 
 /** The fold step's decisions. */
 export type FoldDecision =
@@ -371,7 +383,9 @@ export type FoldDecision =
   | "undeclared"
   | "reset"
   | "malformed-snapshot"
-  | "unverified";
+  | "unverified"
+  | "precondition-unmet"
+  | "off-schema";
 
 export interface TypeRecordRecord {
   revision: number;
@@ -402,6 +416,14 @@ export interface TypeRecordRecord {
               }
             | boolean;
           effect?: "merge" | "none";
+          /**
+           * a JSON Schema the instance's current state must satisfy for the operation to take effect (decision 0059); absent, the operation applies in any state
+           */
+          precondition?:
+            | {
+                [k: string]: unknown | undefined;
+              }
+            | boolean;
         }
       | undefined;
   };
@@ -547,6 +569,14 @@ export interface TypeDefineRequest {
               }
             | boolean;
           effect?: "merge" | "none";
+          /**
+           * a JSON Schema the instance's current state must satisfy for the operation to take effect (decision 0059); absent, the operation applies in any state
+           */
+          precondition?:
+            | {
+                [k: string]: unknown | undefined;
+              }
+            | boolean;
         }
       | undefined;
   };

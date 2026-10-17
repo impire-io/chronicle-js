@@ -52,6 +52,12 @@ export class UndeclaredChildError extends PreflightError {}
 /** The instance's type defines no such operation. */
 export class UndefinedOperationError extends PreflightError {}
 
+/** The operation's precondition is not met by the instance's current state (decision 0059). */
+export class PreconditionFailedError extends PreflightError {}
+
+/** The state after the operation would fail the type's schema (decision 0059). */
+export class StateOffSchemaError extends PreflightError {}
+
 /** A streamed reply went quiet past the stall timeout. */
 export class StreamStalledError extends ChronicleError {}
 
