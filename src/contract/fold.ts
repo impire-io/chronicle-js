@@ -4,7 +4,7 @@
 // in the words of decision 0044.
 import type { FoldDecision } from "../generated/contract.js";
 import { mergePatch } from "./merge.js";
-import { SNAPSHOT, type TypeRecord } from "./record.js";
+import { SNAPSHOT, type OpDef, type TypeRecord } from "./record.js";
 import { compileSchema } from "./schema.js";
 
 /** How an instance's stored tail resolves against the store's types. */
@@ -80,14 +80,41 @@ export function judgeSnapshot(record: TypeRecord | undefined, state: unknown): s
   return detail === "" ? "" : `state fails the type's schema: ${detail}`;
 }
 
+/**
+ * Judges the instance's current state against an operation's precondition
+ * (decision 0059): "" when the operation may apply — none declared, or the
+ * state satisfies it. No state yet is judged as the empty object.
+ */
+export function judgePrecondition(def: OpDef, state: unknown): string {
+  if (def.precondition === undefined) {
+    return "";
+  }
+  let validate;
+  try {
+    validate = compileSchema(def.precondition);
+  } catch (err) {
+    return `the operation's precondition does not compile: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  const detail = validate(state === undefined ? {} : state);
+  return detail === "" ? "" : `the operation's precondition is not met: ${detail}`;
+}
+
 /** What one op's record says about it: the decision and why. */
 export interface Judgement {
   decision: FoldDecision;
   detail: string;
 }
 
-/** Judges an op under its type record: whether it is defined, valid and which effect it has. */
-export function judgeRecord(record: TypeRecord, op: { type: string; payload: Uint8Array | string }): Judgement {
+/**
+ * Judges an op under its type record, against the instance's current state:
+ * whether it is defined, valid, allowed by its precondition (decision 0059),
+ * and which effect it has.
+ */
+export function judgeRecord(
+  record: TypeRecord,
+  state: unknown,
+  op: { type: string; payload: Uint8Array | string },
+): Judgement {
   const def = record.operations?.[op.type];
   if (def === undefined) {
     return { decision: "unknown-type", detail: `the type defines no operation ${op.type}` };
@@ -108,6 +135,10 @@ export function judgeRecord(record: TypeRecord, op: { type: string; payload: Uin
   const failed = validate(parsed.value);
   if (failed !== "") {
     return { decision: "invalid", detail: `payload fails its schema: ${failed}` };
+  }
+  const unmet = judgePrecondition(def, state);
+  if (unmet !== "") {
+    return { decision: "precondition-unmet", detail: unmet };
   }
   const effect = def.effect === undefined || def.effect === "" ? "none" : def.effect;
   switch (effect) {
@@ -149,9 +180,12 @@ function parseSnapshot(payload: Uint8Array | string): { state: unknown; frontier
  * Applies one op to an instance's state under its resolution: an
  * undeclared child is marked and moves nothing; a snapshot resets state to
  * its payload's, judged against the type's schema when typed; a declared
- * merge applies RFC 7386 onto current state, empty included; none, an
- * unknown type, an unknown effect, a bad record or an invalid payload moves
- * nothing; an untyped subject moves only by snapshot.
+ * merge applies RFC 7386 onto current state, empty included, and its result
+ * is judged against the type's schema as a snapshot's is (decision 0059: the
+ * schema is the shape every derived state keeps); a precondition the state
+ * does not satisfy marks the op; none, an unknown type, an unknown effect, a
+ * bad record or an invalid payload moves nothing; an untyped subject moves
+ * only by snapshot.
  */
 export function foldStep(
   res: Resolution,
@@ -177,7 +211,7 @@ export function foldStep(
   if (res.kind !== "typed") {
     return { decision: "unknown-type", detail: `instance is untyped: ${res.detail}`, state, moved: false };
   }
-  const judged = judgeRecord(res.record, op);
+  const judged = judgeRecord(res.record, state, op);
   if (judged.decision !== "merge") {
     return { ...judged, state, moved: false };
   }
@@ -185,7 +219,12 @@ export function foldStep(
   if (!parsed.ok) {
     return { decision: "invalid", detail: `merge failed: ${parsed.detail}`, state, moved: false };
   }
-  return { decision: "merge", detail: "", state: mergePatch(state, parsed.value), moved: true };
+  const merged = mergePatch(state, parsed.value);
+  const offSchema = judgeSnapshot(res.record, merged);
+  if (offSchema !== "") {
+    return { decision: "off-schema", detail: `after the operation, ${offSchema}`, state, moved: false };
+  }
+  return { decision: "merge", detail: "", state: merged, moved: true };
 }
 
 /**

@@ -23,6 +23,8 @@ import {
   rfc3339,
   ServiceError,
   SUBJECTS,
+  PreconditionFailedError,
+  StateOffSchemaError,
   UndefinedOperationError,
   type Client,
   type TypeDefinition,
@@ -119,6 +121,10 @@ function matchesError(err: unknown, want: string): boolean {
       return err instanceof NoResponderError;
     case "no-state":
       return err instanceof NotFoundError;
+    case "precondition-failed":
+      return err instanceof PreconditionFailedError || (err instanceof ServiceError && err.code === want);
+    case "state-off-schema":
+      return err instanceof StateOffSchemaError || (err instanceof ServiceError && err.code === want);
     case "refused":
       // The server dropped a publish the member may not make: nobody
       // answers and the request runs out of time, or the connection
@@ -233,7 +239,9 @@ class Runner {
         })) {
           h.append(k, v);
         }
-        h.set(HDR.expectedLastSubjectSeq, "0");
+        // A create-if-absent unless the step names the sequence it expects
+        // — a bare write onto an instance that exists.
+        h.set(HDR.expectedLastSubjectSeq, s.expectSeq === undefined ? "0" : String(s.expectSeq));
         await jetstream(c.connection).publish(
           opsSubject(store, pathTail(instance)),
           encoder.encode(JSON.stringify(s.payload ?? {})),

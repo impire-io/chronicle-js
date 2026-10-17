@@ -136,6 +136,12 @@ export interface OpDef {
   schema: unknown;
   /** What applying it does to the state: merge (updates it) or none (recorded in history only). Always stated; absent reads as none. */
   effect?: string;
+  /**
+   * A JSON Schema the instance's current state must satisfy for the
+   * operation to take effect (decision 0059); absent, the operation applies
+   * in any state. On a create the state judged is the empty object.
+   */
+  precondition?: unknown;
 }
 
 /** A type record, as META holds it under log.<store>.type.<type>. */
